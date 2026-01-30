@@ -206,7 +206,7 @@ class App(tk.Tk):
         ttk.Button(ef, text="Enable", command=lambda: self._send("ENABLE 1")).pack(side="left", expand=True, fill="x")
         ttk.Button(ef, text="Disable", command=lambda: self._send("ENABLE 0")).pack(side="left", expand=True, fill="x", padx=4)
 
-        ttk.Button(cmdf, text="STOP", command=lambda: self._send("STOP")).pack(fill="x", padx=6, pady=3)
+        ttk.Button(cmdf, text="STOP", command=self._stop_motor).pack(fill="x", padx=6, pady=3)
         ttk.Button(cmdf, text="HOME", command=lambda: self._send("HOME")).pack(fill="x", padx=6, pady=3)
 
         rawf = ttk.Frame(cmdf)
@@ -365,6 +365,10 @@ class App(tk.Tk):
 
     def _send_vel(self):
         self._send(f"VEL_DPS {self.vel_dps_var.get().strip()}")
+
+    def _stop_motor(self):
+        self._send("STOP")
+        self._send("VEL_DPS 0")
 
     def _send_raw_cmd(self):
         cmd = self.raw_cmd_var.get().strip()
