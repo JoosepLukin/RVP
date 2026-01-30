@@ -34,6 +34,7 @@ void MotionController::begin(MotionEngine* eng,
   _st = MotorState::MOTOR_DISABLED;
   _homeSteps = 0;
   _targetSteps = 0;
+  _zeroOffsetSteps = 0;
   _velCmdSps = 0;
 
   _loss.reset();
@@ -115,7 +116,7 @@ void MotionController::cmdMoveAbsDegQ100(int32_t degQ100) {
   _eng->setMaxSpeedSps(std::max<uint32_t>(1, maxSps));
   _eng->setAccelSps2(std::max<uint32_t>(1, accSps2));
 
-  _targetSteps = degQ100ToSteps(degQ100);
+  _targetSteps = _zeroOffsetSteps + degQ100ToSteps(degQ100);
   _eng->moveTo(_targetSteps);
 
   _st = MotorState::MOVING_POSITION;
@@ -148,6 +149,16 @@ void MotionController::cmdHomeStart() {
   _st = MotorState::HOMING;
 }
 
+void MotionController::cmdZeroPosition() {
+  if (!_eng) return;
+  _eng->stop();
+  _zeroOffsetSteps = _eng->currentPosition();
+  _targetSteps = _zeroOffsetSteps;
+  _velCmdSps = 0;
+  _homingActive = false;
+  if (_st != MotorState::MOTOR_DISABLED && _st != MotorState::FAULT) _st = MotorState::IDLE;
+}
+
 void MotionController::tick() {
   const uint32_t now = millis();
   const auto& c = _cfg->active();
@@ -158,6 +169,7 @@ void MotionController::tick() {
   }
 
   // Encoder
+  _enc->setInverted(c.encoder_invert != 0);
   _enc->readAngle();
 
   // Motion parameter refresh

@@ -19,6 +19,8 @@ public:
   bool readAngle();                 // updates internal angle values
   int32_t angleDegQ100() const { return _angleDegQ100; }         // 0..36000 (wrapped)
   int32_t absAngleDegQ100() const { return _absAngleDegQ100; }   // unwrapped, can grow +/- with turns
+  void setInverted(bool inverted) { _invert = inverted; }
+  bool inverted() const { return _invert; }
   bool    ok() const { return _ok; }
 
 private:
@@ -34,6 +36,7 @@ private:
 
   int32_t _prevAngleDegQ100 = 0;
   int32_t _turns = 0;
+  bool _invert = false;
 
   SPISettings _spi = SPISettings(1000000, MSBFIRST, SPI_MODE1); // conservative; adjust if needed
 };

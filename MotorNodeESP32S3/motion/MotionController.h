@@ -45,6 +45,7 @@ public:
   void cmdMoveAbsDegQ100(int32_t degQ100);
   void cmdVelocityDegPerSecQ100(int32_t dpsQ100);
   void cmdHomeStart();
+  void cmdZeroPosition();
 
 private:
   int32_t stepsPerRev() const;
@@ -65,6 +66,7 @@ private:
 
   int32_t _homeSteps = 0;
   int32_t _targetSteps = 0;
+  int32_t _zeroOffsetSteps = 0;
 
   // Velocity mode tracking (for possible future catch-up tuning)
   int32_t _velCmdSps = 0;

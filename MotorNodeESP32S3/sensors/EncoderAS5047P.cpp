@@ -82,6 +82,10 @@ bool EncoderAS5047P::readAngle() {
   // Convert 0..16383 -> 0..36000 (deg*100)
   // deg = raw14 * 360 / 16384
   int32_t degQ100 = (int32_t)raw14 * 36000L / 16384L;
+  if (_invert) {
+    degQ100 = 36000 - degQ100;
+    if (degQ100 >= 36000) degQ100 -= 36000;
+  }
 
   // Unwrap:
   // delta > +180deg => wrapped backward
