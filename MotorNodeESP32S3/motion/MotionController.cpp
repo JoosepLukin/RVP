@@ -157,8 +157,7 @@ void MotionController::tick() {
     // stay FAULT until explicit enable, but allow telemetry to show not-disabled timer elapsed
   }
 
-  // Thermistor + encoder
-  _therm->sample(c.r_fixed_ohm, c.ntc_r25_ohm, c.ntc_beta);
+  // Encoder
   _enc->readAngle();
 
   // Motion parameter refresh
