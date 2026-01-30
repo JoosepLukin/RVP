@@ -46,9 +46,9 @@ void TMC2209Driver::begin() {
   // Enables RDSon current measurement mode; datasheet: set internal_Rsense in GCONF.
   _drv->internal_Rsense(true);    // IMPORTANT :contentReference[oaicite:6]{index=6}
 
-  // In internal_Rsense mode, the reference is based on current into VREF (via RREF),
-  // and I_scale_analog=0 uses internal reference derived from 5VOUT. :contentReference[oaicite:7]{index=7}
-  _drv->I_scale_analog(false);
+  // In internal_Rsense mode, use the VREF pin current (RREF from 5VOUT -> VREF)
+  // so the external resistor defines the current reference. :contentReference[oaicite:7]{index=7}
+  _drv->I_scale_analog(true);
 
   // Use UART register for microstep resolution
   _drv->mstep_reg_select(true);   // use MRES register :contentReference[oaicite:8]{index=8}
