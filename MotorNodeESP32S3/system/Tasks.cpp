@@ -33,8 +33,9 @@ static void MotionTask(void*) {
 
 static void SensorTask(void*) {
   for (;;) {
-    T->sample();
-    vTaskDelay(pdMS_TO_TICKS(C->active().therm_interval_ms));
+    const auto& c = C->active();
+    T->sample(c.r_fixed_ohm, c.ntc_r25_ohm, c.ntc_beta);
+    vTaskDelay(pdMS_TO_TICKS(c.therm_interval_ms));
   }
 }
 
