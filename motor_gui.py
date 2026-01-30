@@ -209,6 +209,13 @@ class App(tk.Tk):
         ttk.Button(cmdf, text="STOP", command=lambda: self._send("STOP")).pack(fill="x", padx=6, pady=3)
         ttk.Button(cmdf, text="HOME", command=lambda: self._send("HOME")).pack(fill="x", padx=6, pady=3)
 
+        rawf = ttk.Frame(cmdf)
+        rawf.pack(fill="x", padx=6, pady=6)
+        self.raw_cmd_var = tk.StringVar()
+        ttk.Entry(rawf, textvariable=self.raw_cmd_var, width=24).pack(side="left", expand=True, fill="x")
+        ttk.Button(rawf, text="Send", command=self._send_raw_cmd).pack(side="left", padx=4)
+        ttk.Button(rawf, text="Help", command=lambda: self._send("HELP")).pack(side="left")
+
         mf = ttk.LabelFrame(left, text="Move / Velocity")
         mf.pack(fill="x", pady=6)
 
@@ -358,6 +365,13 @@ class App(tk.Tk):
 
     def _send_vel(self):
         self._send(f"VEL_DPS {self.vel_dps_var.get().strip()}")
+
+    def _send_raw_cmd(self):
+        cmd = self.raw_cmd_var.get().strip()
+        if not cmd:
+            messagebox.showerror("Command", "Enter a command to send.")
+            return
+        self._send(cmd)
 
     def _send_get_ids(self):
         ids = self.get_ids_var.get().strip()
