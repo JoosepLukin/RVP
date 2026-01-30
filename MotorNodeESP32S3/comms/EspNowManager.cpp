@@ -142,6 +142,12 @@ void EspNowManager::onRecv(const uint8_t* mac, const uint8_t* data, int len) {
       break;
     }
 
+    case Proto::CMD_ZERO_POS:
+      if (!_motion) { sendAck(mac, hdr.seq, 2); break; }
+      _motion->cmdZeroPosition();
+      sendAck(mac, hdr.seq, 0);
+      break;
+
     case Proto::CMD_HOME_START:
       if (!_motion) { sendAck(mac, hdr.seq, 2); break; }
       _motion->cmdHomeStart();

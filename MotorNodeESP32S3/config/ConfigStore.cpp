@@ -32,6 +32,8 @@ void ConfigStore::hardClamp() {
   if (_cfg.r_fixed_ohm < 1000) _cfg.r_fixed_ohm = 10000;
   if (_cfg.ntc_beta < 1000) _cfg.ntc_beta = 3950;
   if (_cfg.therm_interval_ms < 200) _cfg.therm_interval_ms = 200;
+
+  if (_cfg.encoder_invert > 1) _cfg.encoder_invert = 1;
 }
 
 void ConfigStore::saveToNvs() {
@@ -211,6 +213,11 @@ bool ConfigStore::setParam(uint16_t id, uint8_t type, const uint8_t* v, uint8_t 
       hardClamp();
       bumpRevision(); return true;
 
+    case Cfg::P_ENCODER_INVERT:
+      if (type != Proto::VT_BOOL || !needLen(1)) { entryResult = 2; return false; }
+      _cfg.encoder_invert = v[0] ? 1 : 0;
+      bumpRevision(); return true;
+
     default:
       entryResult = 1; // unknown param
       return false;
@@ -289,6 +296,7 @@ size_t ConfigStore::serializeAllTLV(uint8_t* out, size_t outMax) const {
   putTLV(out, outMax, w, Cfg::P_THERM_INTERVAL_MS, Proto::VT_U16, &_cfg.therm_interval_ms, 2);
 
   putTLV(out, outMax, w, Cfg::P_TELEM_INTERVAL_MS, Proto::VT_U16, &_cfg.telem_interval_ms, 2);
+  putTLV(out, outMax, w, Cfg::P_ENCODER_INVERT, Proto::VT_BOOL, &_cfg.encoder_invert, 1);
   return w;
 }
 
@@ -326,6 +334,7 @@ size_t ConfigStore::serializeSelectedTLV(const uint16_t* ids, size_t idCount, ui
       case Cfg::P_NTC_BETA: putTLV(out, outMax, w, id, Proto::VT_U32, &_cfg.ntc_beta, 4); break;
 
       case Cfg::P_TELEM_INTERVAL_MS: putTLV(out, outMax, w, id, Proto::VT_U16, &_cfg.telem_interval_ms, 2); break;
+      case Cfg::P_ENCODER_INVERT: putTLV(out, outMax, w, id, Proto::VT_BOOL, &_cfg.encoder_invert, 1); break;
 
       default:
         // unknown -> skip

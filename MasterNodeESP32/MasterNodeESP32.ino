@@ -35,6 +35,7 @@ namespace Proto {
     CMD_STOP          = 0x08,
     CMD_MOVE_ABS_DEG  = 0x20,
     CMD_VELOCITY_DPS  = 0x21,
+    CMD_ZERO_POS      = 0x22,
     CMD_HOME_START    = 0x30,
 
     CMD_GET_CONFIG    = 0x41,
@@ -325,6 +326,7 @@ static bool espnowBegin(uint8_t channel) {
 //   STOP
 //   MOVE_DEG <float_degrees>
 //   VEL_DPS <float_deg_per_sec>
+//   ZERO
 //   HOME
 //   GETCFG ALL
 //   GETCFG IDS 0x0001,0x0010,0x0400
@@ -362,7 +364,7 @@ static void handleLine(String line) {
 
   if (cmd == "HELP") {
     replyOk("Commands: MAC <aa:bb:cc:dd:ee:ff>, CHAN <1-14>, PING, ENABLE <0|1>, STOP, "
-            "MOVE_DEG <deg>, VEL_DPS <dps>, HOME, GETCFG ALL|IDS <id,...>, "
+            "MOVE_DEG <deg>, VEL_DPS <dps>, ZERO, HOME, GETCFG ALL|IDS <id,...>, "
             "SETCFG <flags> <id> <type> <value>, CUR <irun> <ihold> [FLAGS|SAVE], SAVE");
     return;
   }
@@ -427,6 +429,13 @@ static void handleLine(String line) {
     Proto::CmdVelocityDpsPayload p{ q100 };
     if (!buildAndSend(gPeerMac, Proto::CMD_VELOCITY_DPS, Proto::FLAG_ACK_REQ, (uint8_t*)&p, sizeof(p))) replyErr("send failed");
     else replyOk("sent velocity");
+    return;
+  }
+
+  if (cmd == "ZERO") {
+    if (!requirePeer()) return;
+    if (!buildAndSend(gPeerMac, Proto::CMD_ZERO_POS, Proto::FLAG_ACK_REQ, nullptr, 0)) replyErr("send failed");
+    else replyOk("sent zero position");
     return;
   }
 

@@ -24,6 +24,7 @@ enum MsgType : uint8_t {
 
   CMD_MOVE_ABS_DEG  = 0x20,   // target in degrees (q100)
   CMD_VELOCITY_DPS  = 0x21,   // velocity in deg/s (q100)
+  CMD_ZERO_POS      = 0x22,   // zero motor position (current = 0)
 
   CMD_HOME_START    = 0x30,
 

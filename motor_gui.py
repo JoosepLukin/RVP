@@ -14,6 +14,7 @@ import serial.tools.list_ports
 # NOTE: TMC IRUN/IHOLD IDs corrected to your motor node:
 P_TMC_IRUN  = 0x0013
 P_TMC_IHOLD = 0x0014
+P_ENCODER_INVERT = 0x0500
 
 PARAMS = {
     0x0001: ("node_id", 1, ""),
@@ -50,6 +51,7 @@ PARAMS = {
     0x0303: ("therm_interval_ms", 2, "ms"),
 
     0x0400: ("telem_interval_ms", 2, "ms"),
+    P_ENCODER_INVERT: ("encoder_invert", 6, "bool"),
 }
 
 TYPE_NAMES = {1: "U8", 2: "U16", 3: "U32", 4: "I16", 5: "I32", 6: "BOOL"}
@@ -208,6 +210,7 @@ class App(tk.Tk):
 
         ttk.Button(cmdf, text="STOP", command=lambda: self._send("STOP")).pack(fill="x", padx=6, pady=3)
         ttk.Button(cmdf, text="HOME", command=lambda: self._send("HOME")).pack(fill="x", padx=6, pady=3)
+        ttk.Button(cmdf, text="Zero Position", command=lambda: self._send("ZERO")).pack(fill="x", padx=6, pady=3)
 
         rawf = ttk.Frame(cmdf)
         rawf.pack(fill="x", padx=6, pady=6)
@@ -230,6 +233,13 @@ class App(tk.Tk):
         ttk.Label(row, text="Velocity dps:").pack(side="left")
         ttk.Entry(row, textvariable=self.vel_dps_var, width=10).pack(side="left", padx=6)
         ttk.Button(row, text="Send", command=self._send_vel).pack(side="left")
+
+        encf = ttk.LabelFrame(left, text="Encoder")
+        encf.pack(fill="x", pady=6)
+
+        self.encoder_invert_var = tk.IntVar(value=0)
+        ttk.Checkbutton(encf, text="Invert encoder reading", variable=self.encoder_invert_var).pack(anchor="w", padx=6, pady=3)
+        ttk.Button(encf, text="Apply", command=self._set_encoder_invert).pack(fill="x", padx=6, pady=(0, 6))
 
         # ----- TMC Current (IRUN/IHOLD) -----
         tmc = ttk.LabelFrame(left, text="TMC2209 Current (IRUN/IHOLD)")
@@ -261,7 +271,7 @@ class App(tk.Tk):
         ttk.Button(cf, text="Get ALL", command=lambda: self._send("GETCFG ALL")).pack(fill="x", padx=6, pady=3)
 
         ids_row = ttk.Frame(cf); ids_row.pack(fill="x", padx=6, pady=3)
-        self.get_ids_var = tk.StringVar(value="0x0010,0x0011,0x0012,0x0013,0x0014,0x0400")
+        self.get_ids_var = tk.StringVar(value="0x0010,0x0011,0x0012,0x0013,0x0014,0x0400,0x0500")
         ttk.Entry(ids_row, textvariable=self.get_ids_var, width=24).pack(side="left", expand=True, fill="x")
         ttk.Button(ids_row, text="Get IDs", command=self._send_get_ids).pack(side="left", padx=4)
 
@@ -372,6 +382,11 @@ class App(tk.Tk):
             messagebox.showerror("Command", "Enter a command to send.")
             return
         self._send(cmd)
+
+    def _set_encoder_invert(self):
+        flags = self._flags_int()
+        val = "1" if self.encoder_invert_var.get() else "0"
+        self._send_setcfg_pid(P_ENCODER_INVERT, 6, val, flags)
 
     def _send_get_ids(self):
         ids = self.get_ids_var.get().strip()
@@ -515,6 +530,8 @@ class App(tk.Tk):
                 self.irun_var.set(str(val))
             if pid == P_TMC_IHOLD and isinstance(val, int):
                 self.ihold_var.set(str(val))
+            if pid == P_ENCODER_INVERT and isinstance(val, int):
+                self.encoder_invert_var.set(1 if val else 0)
 
     def _log(self, s: str):
         self.log_text.insert("end", s + "\n")

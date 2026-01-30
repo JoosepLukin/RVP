@@ -53,6 +53,9 @@ enum ParamId : uint16_t {
 
   // Telemetry
   P_TELEM_INTERVAL_MS       = 0x0400, // u16 (500..1000)
+
+  // Encoder
+  P_ENCODER_INVERT          = 0x0500, // bool (0/1)
 };
 
 struct ActiveConfig {
@@ -91,6 +94,8 @@ struct ActiveConfig {
   uint16_t therm_interval_ms = 1000;
 
   uint16_t telem_interval_ms = 500;
+
+  uint8_t encoder_invert = 0;
 
   uint32_t revision = 1;
 };
