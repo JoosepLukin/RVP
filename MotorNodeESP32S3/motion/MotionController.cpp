@@ -48,7 +48,7 @@ void MotionController::begin(MotionEngine* eng,
 int32_t MotionController::stepsPerRev() const {
   const int32_t fullSteps = 200; // 1.8deg
   int32_t ms = (int32_t)_cfg->active().microsteps;
-  if (ms < 16) ms = 16;
+  if (ms < 1) ms = 1;
   return fullSteps * ms;
 }
 
