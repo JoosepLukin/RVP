@@ -360,6 +360,13 @@ static void handleLine(String line) {
   String rest = (sp < 0) ? "" : line.substring(sp + 1);
   rest.trim();
 
+  if (cmd == "HELP") {
+    replyOk("Commands: MAC <aa:bb:cc:dd:ee:ff>, CHAN <1-14>, PING, ENABLE <0|1>, STOP, "
+            "MOVE_DEG <deg>, VEL_DPS <dps>, HOME, GETCFG ALL|IDS <id,...>, "
+            "SETCFG <flags> <id> <type> <value>, CUR <irun> <ihold> [FLAGS|SAVE], SAVE");
+    return;
+  }
+
   if (cmd == "MAC") {
     uint8_t mac[6];
     if (!parseMac(rest, mac)) { replyErr("Bad MAC format"); return; }
