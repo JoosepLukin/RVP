@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <Preferences.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -30,6 +31,7 @@ enum MsgType : uint8_t {
 
 enum AckCode : uint8_t {
   ACK_OK          = 0,
+  ACK_BAD_ARG     = 1,
   ACK_UNKNOWN_CMD = 4
 };
 
@@ -68,6 +70,9 @@ enum CmdId : uint16_t {
 
   CMD_SET_THERMISTOR_PARAMS    = 0x0070, // rFixed,u32 r0,u32 beta,u16 t0_x10,i16 samples,u8
 
+  CMD_SET_NODE_ID              = 0x00E0, // u16 (0..32; 0=unassigned)
+  CMD_SAVE_CONFIG_NVS          = 0x00E1, // no payload
+
   CMD_REQUEST_STATUS_NOW       = 0x00F0
 };
 
@@ -89,7 +94,8 @@ struct __attribute__((packed)) MsgAck {
   uint16_t cmd;
   uint16_t seq;
   uint8_t  code;
-  uint8_t  rsv[3];
+  uint16_t node_id;
+  uint8_t  rsv0;
 };
 
 // Status (62 bytes)
@@ -125,10 +131,12 @@ struct __attribute__((packed)) MsgStatus {
   uint32_t drv_status;
   uint32_t ioin;
   uint8_t  ifcnt;
-  uint8_t  rsv1[3];
+  uint16_t node_id;
+  uint8_t  rsv1;
 };
 
 static_assert(sizeof(MsgCommand) == 40, "MsgCommand size mismatch");
+static_assert(sizeof(MsgAck)     == 12, "MsgAck size mismatch");
 static_assert(sizeof(MsgStatus)  == 62, "MsgStatus size mismatch");
 
 // -------- master tracking ----------
@@ -136,10 +144,22 @@ static bool g_hasMaster = false;
 static uint8_t g_masterMac[6] = {0};
 static uint16_t g_statusSeq = 0;
 
+// -------- node ID + status request ----------
+static Preferences g_prefs;
+static uint16_t g_node_id = 0; // 0=unassigned
+static bool g_status_request_pending = false;
+
 static char g_selfMacStr[18] = {0};
 
 static inline const char* selfMacStr() { return g_selfMacStr; }
 static inline bool hasMaster() { return g_hasMaster; }
+static inline uint16_t nodeId() { return g_node_id; }
+
+static inline bool consumeStatusRequest() {
+  bool v = g_status_request_pending;
+  g_status_request_pending = false;
+  return v;
+}
 
 // -------- command queue ----------
 struct CmdItem {
@@ -184,6 +204,8 @@ static inline void sendAckTo(const uint8_t* mac, uint16_t cmd, uint16_t seq, uin
   a.cmd = cmd;
   a.seq = seq;
   a.code = code;
+  a.node_id = g_node_id;
+  a.rsv0 = 0;
   (void)esp_now_send(mac, (uint8_t*)&a, sizeof(a));
 }
 
@@ -220,7 +242,8 @@ static inline void fillStatus(MsgStatus& st) {
   st.drv_status      = MotionControl::drvStatus();
   st.ioin            = MotionControl::ioin();
   st.ifcnt           = MotionControl::ifcnt();
-  st.rsv1[0] = st.rsv1[1] = st.rsv1[2] = 0;
+  st.node_id         = g_node_id;
+  st.rsv1            = 0;
 }
 
 static inline void sendStatus(const MsgStatus& st) {
@@ -372,7 +395,22 @@ static inline uint8_t handleCommand(const MsgCommand& m) {
       return ACK_OK;
     }
 
+    case CMD_SET_NODE_ID: {
+      uint16_t id;
+      memcpy(&id, m.payload, sizeof(id));
+      if (id > 32) return ACK_BAD_ARG;
+      g_node_id = id;
+      (void)g_prefs.putUShort("id", id);
+      return ACK_OK;
+    }
+
+    case CMD_SAVE_CONFIG_NVS:
+      MotionControl::saveConfigToNvs();
+      Sensors::saveConfigToNvs();
+      return ACK_OK;
+
     case CMD_REQUEST_STATUS_NOW:
+      g_status_request_pending = true;
       return ACK_OK;
 
     default:
@@ -420,6 +458,9 @@ static inline bool begin() {
   WiFi.macAddress(mac);
   macToStr(mac, g_selfMacStr);
 
+  (void)g_prefs.begin("mn", false);
+  g_node_id = (uint16_t)g_prefs.getUShort("id", 0);
+
   if (esp_now_init() != ESP_OK) return false;
 
   esp_now_register_recv_cb(onRecv);
@@ -438,9 +479,32 @@ static inline bool begin() {
 static inline void service() {
   if (!g_cmdQ) return;
 
+  // Dedup ring so retries never re-execute motor actions.
+  static constexpr uint8_t DEDUP_SLOTS = 64;
+  struct DedupEntry { uint16_t seq; uint16_t cmd; uint8_t code; bool valid; };
+  static DedupEntry dedup[DEDUP_SLOTS] = {};
+  static uint8_t dedup_head = 0;
+
   CmdItem item;
   while (xQueueReceive(g_cmdQ, &item, 0) == pdTRUE) {
-    uint8_t code = handleCommand(item.msg);
+    bool is_dup = false;
+    uint8_t code = ACK_OK;
+
+    for (uint8_t i = 0; i < DEDUP_SLOTS; i++) {
+      if (!dedup[i].valid) continue;
+      if (dedup[i].seq != item.msg.seq) continue;
+      if (dedup[i].cmd != item.msg.cmd) continue;
+      code = dedup[i].code;
+      is_dup = true;
+      break;
+    }
+
+    if (!is_dup) {
+      code = handleCommand(item.msg);
+      dedup[dedup_head] = DedupEntry{item.msg.seq, item.msg.cmd, code, true};
+      dedup_head = (uint8_t)((dedup_head + 1) % DEDUP_SLOTS);
+    }
+
     sendAckTo(item.mac, item.msg.cmd, item.msg.seq, code);
   }
 }

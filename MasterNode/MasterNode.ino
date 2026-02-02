@@ -50,6 +50,9 @@ enum CmdId : uint16_t {
 
   CMD_SET_THERMISTOR_PARAMS    = 0x0070,
 
+  CMD_SET_NODE_ID              = 0x00E0, // u16 (0..32; 0=unassigned)
+  CMD_SAVE_CONFIG_NVS          = 0x00E1, // no payload
+
   CMD_REQUEST_STATUS_NOW       = 0x00F0
 };
 
@@ -69,7 +72,8 @@ struct __attribute__((packed)) MsgAck {
   uint16_t cmd;
   uint16_t seq;
   uint8_t  code;
-  uint8_t  rsv[3];
+  uint16_t node_id;
+  uint8_t  rsv0;
 };
 
 struct __attribute__((packed)) MsgStatus {
@@ -104,7 +108,8 @@ struct __attribute__((packed)) MsgStatus {
   uint32_t drv_status;
   uint32_t ioin;
   uint8_t  ifcnt;
-  uint8_t  rsv1[3];
+  uint16_t node_id;
+  uint8_t  rsv1;
 };
 
 static_assert(sizeof(MsgCommand) == 40, "MsgCommand must be 40 bytes");
@@ -124,13 +129,21 @@ static const uint8_t BROADCAST_MAC[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
 static uint16_t g_seq = 1;
 
-static bool     g_haveMotor = false;
-static uint8_t  g_motorMac[6] = {0};
-static char     g_motorMacStr[18] = "??:??:??:??:??:??";
-
-static bool     g_haveLastStatus = false;
-static MsgStatus g_lastStatus{};
 static char      g_selfMacStr[18] = {0};
+
+static constexpr uint8_t MAX_MOTORS = 32;
+
+struct MotorRecord {
+  bool     used = false;
+  uint8_t  mac[6] = {0};
+  char     macStr[18] = "??:??:??:??:??:??";
+  uint16_t node_id = 0; // 0=unassigned
+  uint32_t last_seen_ms = 0;
+  bool     have_status = false;
+  MsgStatus last_status{};
+};
+
+static MotorRecord g_motors[MAX_MOTORS];
 
 // RX queue so callbacks stay tiny
 struct RxItem {
@@ -140,6 +153,9 @@ struct RxItem {
 };
 
 static QueueHandle_t g_rxQ = nullptr;
+
+// Forward declarations needed for Arduino IDE auto-prototypes.
+struct TxQueued;
 
 // =====================
 // Helpers
@@ -159,28 +175,226 @@ static void ensureBroadcastPeer() {
   }
 }
 
-static void sendCmd(uint16_t cmd, const void* payload, size_t payloadLen) {
-  MsgCommand m{};
+static void ensurePeer(const uint8_t* mac) {
+  if (!mac) return;
+  if (esp_now_is_peer_exist(mac)) return;
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, mac, 6);
+  peer.channel = WIFI_CHANNEL;
+  peer.encrypt = false;
+  (void)esp_now_add_peer(&peer);
+}
+
+static int findMotorIndexByMac(const uint8_t* mac) {
+  for (int i = 0; i < MAX_MOTORS; i++) {
+    if (!g_motors[i].used) continue;
+    if (memcmp(g_motors[i].mac, mac, 6) == 0) return i;
+  }
+  return -1;
+}
+
+static MotorRecord* upsertMotor(const uint8_t* mac) {
+  int idx = findMotorIndexByMac(mac);
+  if (idx >= 0) {
+    g_motors[idx].last_seen_ms = millis();
+    return &g_motors[idx];
+  }
+  for (int i = 0; i < MAX_MOTORS; i++) {
+    if (g_motors[i].used) continue;
+    g_motors[i] = MotorRecord{};
+    g_motors[i].used = true;
+    memcpy(g_motors[i].mac, mac, 6);
+    macToStr(mac, g_motors[i].macStr);
+    g_motors[i].last_seen_ms = millis();
+    ensurePeer(mac);
+    Serial.printf("{\"type\":\"info\",\"msg\":\"Motor detected\",\"motor\":\"%s\"}\n", g_motors[i].macStr);
+    return &g_motors[i];
+  }
+  Serial.println("{\"type\":\"info\",\"msg\":\"Motor table full\"}");
+  return nullptr;
+}
+
+static MotorRecord* getOnlyMotorOrNull() {
+  MotorRecord* found = nullptr;
+  for (int i = 0; i < MAX_MOTORS; i++) {
+    if (!g_motors[i].used) continue;
+    if (found) return nullptr;
+    found = &g_motors[i];
+  }
+  return found;
+}
+
+// =====================
+// Reliable TX (queue + retries)
+// =====================
+static constexpr uint16_t TX_ACK_TIMEOUT_MS = 120;
+static constexpr uint8_t  TX_RETRY_COUNT    = 2;   // total sends = 1 + retries
+static constexpr uint8_t  TXQ_LEN           = 64;
+
+struct TxQueued {
+  bool     byMask = false;
+  uint32_t mask = 0;
+  bool     byMac = false;
+  uint8_t  mac[6] = {0};
+  uint16_t cmd = 0;
+  uint8_t  payloadLen = 0;
+  uint8_t  payload[32] = {0};
+};
+
+struct PendingTx {
+  bool     in_use = false;
+  uint8_t  mac[6] = {0};
+  char     macStr[18] = "??:??:??:??:??:??";
+  uint16_t node_id = 0;
+  MsgCommand msg{};
+  uint8_t  retries_left = 0;
+  uint32_t next_retry_ms = 0;
+};
+
+static TxQueued  g_txq[TXQ_LEN];
+static uint8_t   g_txq_head = 0, g_txq_tail = 0, g_txq_count = 0;
+
+static bool      g_tx_active = false;
+static PendingTx g_pending[MAX_MOTORS];
+
+static bool txqPush(const TxQueued& it) {
+  if (g_txq_count >= TXQ_LEN) return false;
+  g_txq[g_txq_tail] = it;
+  g_txq_tail = (uint8_t)((g_txq_tail + 1) % TXQ_LEN);
+  g_txq_count++;
+  return true;
+}
+
+static bool txqPop(TxQueued& out) {
+  if (g_txq_count == 0) return false;
+  out = g_txq[g_txq_head];
+  g_txq_head = (uint8_t)((g_txq_head + 1) % TXQ_LEN);
+  g_txq_count--;
+  return true;
+}
+
+static void buildCmd(MsgCommand& m, uint16_t cmd, uint16_t seq, const void* payload, size_t payloadLen) {
+  memset(&m, 0, sizeof(m));
   m.magic = MN_MAGIC;
   m.version = MN_VERSION;
   m.type = MSG_CMD;
   m.cmd = cmd;
-  m.seq = g_seq++;
-
+  m.seq = seq;
   if (payload && payloadLen > 0) {
     if (payloadLen > sizeof(m.payload)) payloadLen = sizeof(m.payload);
     memcpy(m.payload, payload, payloadLen);
   }
-
-  // Send as broadcast so you don't need motor MAC hardcoded.
-  // MotorNode will learn your MAC and then unicast ACK/STATUS back.
-  esp_now_send(BROADCAST_MAC, (uint8_t*)&m, sizeof(m));
 }
 
-static void sendCmdU8(uint16_t cmd, uint8_t v) { sendCmd(cmd, &v, 1); }
-static void sendCmdU16(uint16_t cmd, uint16_t v) { sendCmd(cmd, &v, 2); }
-static void sendCmdU32(uint16_t cmd, uint32_t v) { sendCmd(cmd, &v, 4); }
-static void sendCmdI32(uint16_t cmd, int32_t v) { sendCmd(cmd, &v, 4); }
+static void clearPendingMatching(const uint8_t* mac, uint16_t cmd, uint16_t seq) {
+  for (int i = 0; i < MAX_MOTORS; i++) {
+    if (!g_pending[i].in_use) continue;
+    if (g_pending[i].msg.cmd != cmd) continue;
+    if (g_pending[i].msg.seq != seq) continue;
+    if (memcmp(g_pending[i].mac, mac, 6) != 0) continue;
+    g_pending[i].in_use = false;
+  }
+}
+
+static void beginBatch(const TxQueued& q) {
+  memset(g_pending, 0, sizeof(g_pending));
+
+  uint16_t seq = g_seq++;
+  MsgCommand msg{};
+  buildCmd(msg, q.cmd, seq, q.payload, q.payloadLen);
+
+  uint32_t now = millis();
+  uint8_t targets = 0;
+
+  if (q.byMask) {
+    for (int i = 0; i < MAX_MOTORS; i++) {
+      if (!g_motors[i].used) continue;
+      uint16_t id = g_motors[i].node_id;
+      if (id < 1 || id > 32) continue;
+      if ((q.mask & (1UL << (id - 1))) == 0) continue;
+
+      g_pending[targets] = PendingTx{};
+      g_pending[targets].in_use = true;
+      memcpy(g_pending[targets].mac, g_motors[i].mac, 6);
+      memcpy(g_pending[targets].macStr, g_motors[i].macStr, sizeof(g_pending[targets].macStr));
+      g_pending[targets].node_id = id;
+      g_pending[targets].msg = msg;
+      g_pending[targets].retries_left = TX_RETRY_COUNT;
+      g_pending[targets].next_retry_ms = now + TX_ACK_TIMEOUT_MS;
+      ensurePeer(g_pending[targets].mac);
+      (void)esp_now_send(g_pending[targets].mac, (uint8_t*)&g_pending[targets].msg, sizeof(MsgCommand));
+      targets++;
+      if (targets >= MAX_MOTORS) break;
+    }
+  } else if (q.byMac) {
+    MotorRecord* m = upsertMotor(q.mac);
+    if (m) {
+      g_pending[0] = PendingTx{};
+      g_pending[0].in_use = true;
+      memcpy(g_pending[0].mac, m->mac, 6);
+      memcpy(g_pending[0].macStr, m->macStr, sizeof(g_pending[0].macStr));
+      g_pending[0].node_id = m->node_id;
+      g_pending[0].msg = msg;
+      g_pending[0].retries_left = TX_RETRY_COUNT;
+      g_pending[0].next_retry_ms = now + TX_ACK_TIMEOUT_MS;
+      ensurePeer(g_pending[0].mac);
+      (void)esp_now_send(g_pending[0].mac, (uint8_t*)&g_pending[0].msg, sizeof(MsgCommand));
+      targets = 1;
+    }
+  }
+
+  if (targets == 0) {
+    Serial.println("{\"type\":\"info\",\"msg\":\"No targets (unknown IDs or no motors)\"}");
+    g_tx_active = false;
+    return;
+  }
+
+  g_tx_active = true;
+}
+
+static void serviceTx() {
+  uint32_t now = millis();
+
+  if (!g_tx_active) {
+    TxQueued next;
+    if (txqPop(next)) beginBatch(next);
+    return;
+  }
+
+  bool any = false;
+  for (int i = 0; i < MAX_MOTORS; i++) {
+    if (!g_pending[i].in_use) continue;
+    any = true;
+
+    if ((int32_t)(now - g_pending[i].next_retry_ms) < 0) continue;
+
+    if (g_pending[i].retries_left > 0) {
+      g_pending[i].retries_left--;
+      g_pending[i].next_retry_ms = now + TX_ACK_TIMEOUT_MS;
+      ensurePeer(g_pending[i].mac);
+      (void)esp_now_send(g_pending[i].mac, (uint8_t*)&g_pending[i].msg, sizeof(MsgCommand));
+      continue;
+    }
+
+    Serial.printf(
+      "{\"type\":\"info\",\"msg\":\"TX timeout\",\"id\":%u,\"mac\":\"%s\",\"cmd\":\"0x%04X\",\"seq\":%u}\n",
+      (unsigned)g_pending[i].node_id,
+      g_pending[i].macStr,
+      (unsigned)g_pending[i].msg.cmd,
+      (unsigned)g_pending[i].msg.seq
+    );
+    g_pending[i].in_use = false;
+  }
+
+  if (!any) g_tx_active = false;
+}
+
+static void sendBroadcastCmd(uint16_t cmd) {
+  MsgCommand m{};
+  buildCmd(m, cmd, g_seq++, nullptr, 0);
+  ensureBroadcastPeer();
+  (void)esp_now_send(BROADCAST_MAC, (uint8_t*)&m, sizeof(m));
+}
 
 static int32_t fullStepsFloatToQ(float fs) {
   // QFULL=256 format
@@ -228,17 +442,13 @@ static bool readLine(String &out) {
 }
 
 static void printHelp() {
-  Serial.println("{\"type\":\"info\",\"msg\":\"Commands: HELP, PING, ENABLE 0|1, KEEP 0|1, CL 0|1, APPLY, USTEPS n, INTPOL 0|1, DEDGE 0|1, CUR irun ihold ihd, SPEED sps, ACCEL sps2, MOVE_TO x, MOVE_BY d, VEL v, STOP, FSTOP, ENC_POLL us, ENC_TO_MOTOR, MOTOR_TO_ENC, MOTOR_ZERO, ENC_ZERO, THR_BASE fs, THR_GAIN fsPerRps, THR_US us, THERM rFixed r0 beta t0C samples, GET_STATUS\"}");
+  Serial.println(
+    "{\"type\":\"info\",\"msg\":\"Commands: HELP, GET_STATUS, PING, IDS <mask> <cmd...>, SET_ID <mac> <id>, SAVE_CFG. "
+    "Use IDS for motor-targeted commands (ENABLE/KEEP/CL/APPLY/USTEPS/INTPOL/DEDGE/CUR/SPEED/ACCEL/MOVE_TO/MOVE_BY/VEL/STOP/FSTOP/ENC_POLL/ENC_TO_MOTOR/MOTOR_TO_ENC/MOTOR_ZERO/ENC_ZERO/THR_BASE/THR_GAIN/THR_US/THERM/REQ_STATUS).\"}"
+  );
 }
 
-static void emitLastStatusJson() {
-  if (!g_haveLastStatus) {
-    Serial.println("{\"type\":\"info\",\"msg\":\"No status received yet.\"}");
-    return;
-  }
-
-  const MsgStatus &s = g_lastStatus;
-
+static void emitStatusJson(const char* macStr, uint16_t node_id, const MsgStatus &s) {
   float temp = NAN;
   if (s.temp_c_x10 != INT16_MIN) temp = (float)s.temp_c_x10 / 10.0f;
 
@@ -248,7 +458,7 @@ static void emitLastStatusJson() {
 
   // JSON line for Python GUI
   Serial.printf(
-    "{\"type\":\"status\",\"from\":\"%s\",\"seq\":%u,\"uptime_ms\":%lu,"
+    "{\"type\":\"status\",\"from\":\"%s\",\"id\":%u,\"seq\":%u,\"uptime_ms\":%lu,"
     "\"motor_pos\":%ld,\"enc_pos\":%ld,\"err\":%ld,\"thr\":%ld,"
     "\"missed\":%lu,"
     "\"temp_c\":%s,"
@@ -256,7 +466,8 @@ static void emitLastStatusJson() {
     "\"speed\":%lu,\"accel\":%lu,"
     "\"usteps\":%u,\"irun\":%u,\"ihold\":%u,\"ihd\":%u,"
     "\"drv\":\"%s\",\"ioin\":\"%s\",\"ifcnt\":%u}\n",
-    g_motorMacStr,
+    macStr,
+    (unsigned)node_id,
     (unsigned)s.seq,
     (unsigned long)s.uptime_ms,
     (long)s.motor_pos_user,
@@ -281,6 +492,66 @@ static void emitLastStatusJson() {
   );
 }
 
+static void emitAckJson(const char* macStr, uint16_t node_id, const MsgAck &a) {
+  Serial.printf("{\"type\":\"ack\",\"from\":\"%s\",\"id\":%u,\"cmd\":\"0x%04X\",\"seq\":%u,\"code\":%u}\n",
+                macStr, (unsigned)node_id, (unsigned)a.cmd, (unsigned)a.seq, (unsigned)a.code);
+}
+
+static void emitAllStatusJson() {
+  bool any = false;
+  for (int i = 0; i < MAX_MOTORS; i++) {
+    if (!g_motors[i].used || !g_motors[i].have_status) continue;
+    any = true;
+    emitStatusJson(g_motors[i].macStr, g_motors[i].node_id, g_motors[i].last_status);
+  }
+  if (!any) Serial.println("{\"type\":\"info\",\"msg\":\"No status received yet.\"}");
+}
+
+static bool parseMacStr(const char* s, uint8_t out[6]) {
+  if (!s || !out) return false;
+  int v[6] = {0};
+  if (sscanf(s, "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+  for (int i = 0; i < 6; i++) {
+    if (v[i] < 0 || v[i] > 255) return false;
+    out[i] = (uint8_t)v[i];
+  }
+  return true;
+}
+
+static bool enqueueCmdForMask(uint32_t mask, uint16_t cmd, const void* payload, size_t payloadLen) {
+  TxQueued q{};
+  q.byMask = true;
+  q.mask = mask;
+  q.cmd = cmd;
+  if (payload && payloadLen > 0) {
+    if (payloadLen > sizeof(q.payload)) payloadLen = sizeof(q.payload);
+    q.payloadLen = (uint8_t)payloadLen;
+    memcpy(q.payload, payload, payloadLen);
+  }
+  if (!txqPush(q)) {
+    Serial.println("{\"type\":\"info\",\"msg\":\"TX queue full\"}");
+    return false;
+  }
+  return true;
+}
+
+static bool enqueueCmdForMac(const uint8_t mac[6], uint16_t cmd, const void* payload, size_t payloadLen) {
+  TxQueued q{};
+  q.byMac = true;
+  memcpy(q.mac, mac, 6);
+  q.cmd = cmd;
+  if (payload && payloadLen > 0) {
+    if (payloadLen > sizeof(q.payload)) payloadLen = sizeof(q.payload);
+    q.payloadLen = (uint8_t)payloadLen;
+    memcpy(q.payload, payload, payloadLen);
+  }
+  if (!txqPush(q)) {
+    Serial.println("{\"type\":\"info\",\"msg\":\"TX queue full\"}");
+    return false;
+  }
+  return true;
+}
+
 static void handleSerialCommand(const String &lineIn) {
   String line = lineIn;
   line.trim();
@@ -298,52 +569,111 @@ static void handleSerialCommand(const String &lineIn) {
 
   auto eq = [](const char* a, const char* b){ return strcasecmp(a,b)==0; };
 
-  if (eq(tok, "HELP")) { printHelp(); return; }
-  if (eq(tok, "GET_STATUS")) { emitLastStatusJson(); return; }
+  bool hasMask = false;
+  uint32_t mask = 0;
+  if (eq(tok, "IDS")) {
+    char* m = strtok(nullptr, " ");
+    if (!m) return;
+    mask = (uint32_t)strtoul(m, nullptr, 0);
+    hasMask = true;
+    tok = strtok(nullptr, " ");
+    if (!tok) return;
+  }
 
-  if (eq(tok, "PING")) { sendCmd(CMD_PING, nullptr, 0); return; }
+  if (eq(tok, "HELP")) { printHelp(); return; }
+  if (eq(tok, "GET_STATUS")) { emitAllStatusJson(); return; }
+  if (eq(tok, "PING")) { sendBroadcastCmd(CMD_PING); return; }
+
+  if (eq(tok, "SET_ID")) {
+    char* m = strtok(nullptr, " ");
+    char* t = strtok(nullptr, " ");
+    if (!m || !t) return;
+    uint8_t mac[6];
+    if (!parseMacStr(m, mac)) {
+      Serial.println("{\"type\":\"info\",\"msg\":\"SET_ID bad MAC\"}");
+      return;
+    }
+    uint16_t id = (uint16_t)strtoul(t, nullptr, 10);
+    uint8_t p[2] = {0};
+    memcpy(p, &id, 2);
+    (void)enqueueCmdForMac(mac, CMD_SET_NODE_ID, p, sizeof(p));
+    return;
+  }
+
+  if (eq(tok, "SAVE_CFG")) {
+    if (!hasMask) {
+      Serial.println("{\"type\":\"info\",\"msg\":\"SAVE_CFG requires IDS <mask>\"}");
+      return;
+    }
+    (void)enqueueCmdForMask(mask, CMD_SAVE_CONFIG_NVS, nullptr, 0);
+    return;
+  }
+
+  // If no IDS prefix, allow legacy single-motor mode.
+  bool byMac = false;
+  uint8_t mac[6] = {0};
+  if (!hasMask) {
+    MotorRecord* only = getOnlyMotorOrNull();
+    if (!only) {
+      Serial.println("{\"type\":\"info\",\"msg\":\"Multiple or zero motors known. Use: IDS <mask> <cmd...>\"}");
+      return;
+    }
+    byMac = true;
+    memcpy(mac, only->mac, 6);
+  }
+
+  auto enqueueTargeted = [&](uint16_t cmd, const void* payload, size_t payloadLen) {
+    if (hasMask) (void)enqueueCmdForMask(mask, cmd, payload, payloadLen);
+    else         (void)enqueueCmdForMac(mac, cmd, payload, payloadLen);
+  };
 
   if (eq(tok, "ENABLE")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU8(CMD_SET_ENABLE, (uint8_t)atoi(t));
+    uint8_t v = (uint8_t)atoi(t);
+    enqueueTargeted(CMD_SET_ENABLE, &v, 1);
     return;
   }
 
   if (eq(tok, "KEEP")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU8(CMD_SET_KEEP_ENABLED, (uint8_t)atoi(t));
+    uint8_t v = (uint8_t)atoi(t);
+    enqueueTargeted(CMD_SET_KEEP_ENABLED, &v, 1);
     return;
   }
 
   if (eq(tok, "CL")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU8(CMD_SET_CL_MODE, (uint8_t)atoi(t));
+    uint8_t v = (uint8_t)atoi(t);
+    enqueueTargeted(CMD_SET_CL_MODE, &v, 1);
     return;
   }
 
-  if (eq(tok, "APPLY")) { sendCmd(CMD_APPLY_CONFIG_NOW, nullptr, 0); return; }
+  if (eq(tok, "APPLY")) { enqueueTargeted(CMD_APPLY_CONFIG_NOW, nullptr, 0); return; }
 
   if (eq(tok, "USTEPS")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU16(CMD_SET_MICROSTEPS, (uint16_t)atoi(t));
+    uint16_t v = (uint16_t)atoi(t);
+    enqueueTargeted(CMD_SET_MICROSTEPS, &v, 2);
     return;
   }
 
   if (eq(tok, "INTPOL")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU8(CMD_SET_INTPOL, (uint8_t)atoi(t));
+    uint8_t v = (uint8_t)atoi(t);
+    enqueueTargeted(CMD_SET_INTPOL, &v, 1);
     return;
   }
 
   if (eq(tok, "DEDGE")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU8(CMD_SET_DEDGE, (uint8_t)atoi(t));
+    uint8_t v = (uint8_t)atoi(t);
+    enqueueTargeted(CMD_SET_DEDGE, &v, 1);
     return;
   }
 
@@ -353,66 +683,72 @@ static void handleSerialCommand(const String &lineIn) {
     char* c = strtok(nullptr, " ");
     if (!a || !b || !c) return;
     uint8_t p[3] = {(uint8_t)atoi(a), (uint8_t)atoi(b), (uint8_t)atoi(c)};
-    sendCmd(CMD_SET_CURRENTS, p, sizeof(p));
+    enqueueTargeted(CMD_SET_CURRENTS, p, sizeof(p));
     return;
   }
 
   if (eq(tok, "SPEED")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU32(CMD_SET_SPEED_SPS, (uint32_t)strtoul(t, nullptr, 10));
+    uint32_t v = (uint32_t)strtoul(t, nullptr, 10);
+    enqueueTargeted(CMD_SET_SPEED_SPS, &v, 4);
     return;
   }
 
   if (eq(tok, "ACCEL")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU32(CMD_SET_ACCEL_SPS2, (uint32_t)strtoul(t, nullptr, 10));
+    uint32_t v = (uint32_t)strtoul(t, nullptr, 10);
+    enqueueTargeted(CMD_SET_ACCEL_SPS2, &v, 4);
     return;
   }
 
   if (eq(tok, "MOVE_TO")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdI32(CMD_MOVE_TO, (int32_t)strtol(t, nullptr, 10));
+    int32_t v = (int32_t)strtol(t, nullptr, 10);
+    enqueueTargeted(CMD_MOVE_TO, &v, 4);
     return;
   }
 
   if (eq(tok, "MOVE_BY")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdI32(CMD_MOVE_BY, (int32_t)strtol(t, nullptr, 10));
+    int32_t v = (int32_t)strtol(t, nullptr, 10);
+    enqueueTargeted(CMD_MOVE_BY, &v, 4);
     return;
   }
 
   if (eq(tok, "VEL")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdI32(CMD_VELOCITY, (int32_t)strtol(t, nullptr, 10));
+    int32_t v = (int32_t)strtol(t, nullptr, 10);
+    enqueueTargeted(CMD_VELOCITY, &v, 4);
     return;
   }
 
-  if (eq(tok, "STOP")) { sendCmd(CMD_STOP_DECEL, nullptr, 0); return; }
-  if (eq(tok, "FSTOP")) { sendCmd(CMD_FORCE_STOP, nullptr, 0); return; }
+  if (eq(tok, "STOP")) { enqueueTargeted(CMD_STOP_DECEL, nullptr, 0); return; }
+  if (eq(tok, "FSTOP")) { enqueueTargeted(CMD_FORCE_STOP, nullptr, 0); return; }
 
   if (eq(tok, "ENC_POLL")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU32(CMD_SET_ENCODER_POLL_US, (uint32_t)strtoul(t, nullptr, 10));
+    uint32_t v = (uint32_t)strtoul(t, nullptr, 10);
+    enqueueTargeted(CMD_SET_ENCODER_POLL_US, &v, 4);
     return;
   }
 
-  if (eq(tok, "ENC_TO_MOTOR")) { sendCmd(CMD_ENC_SET_TO_MOTOR, nullptr, 0); return; }
-  if (eq(tok, "MOTOR_TO_ENC")) { sendCmd(CMD_MOTOR_SET_TO_ENC, nullptr, 0); return; }
-  if (eq(tok, "MOTOR_ZERO")) { sendCmd(CMD_MOTOR_LOGICAL_ZERO, nullptr, 0); return; }
-  if (eq(tok, "ENC_ZERO")) { sendCmd(CMD_ENC_OFFSET_ZERO, nullptr, 0); return; }
+  if (eq(tok, "ENC_TO_MOTOR")) { enqueueTargeted(CMD_ENC_SET_TO_MOTOR, nullptr, 0); return; }
+  if (eq(tok, "MOTOR_TO_ENC")) { enqueueTargeted(CMD_MOTOR_SET_TO_ENC, nullptr, 0); return; }
+  if (eq(tok, "MOTOR_ZERO")) { enqueueTargeted(CMD_MOTOR_LOGICAL_ZERO, nullptr, 0); return; }
+  if (eq(tok, "ENC_ZERO")) { enqueueTargeted(CMD_ENC_OFFSET_ZERO, nullptr, 0); return; }
 
   if (eq(tok, "THR_BASE")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
     float fs = (float)strtod(t, nullptr);
     int32_t q = fullStepsFloatToQ(fs);
-    sendCmdI32(CMD_SET_MISMATCH_BASE_FULL_Q, q);
+    enqueueTargeted(CMD_SET_MISMATCH_BASE_FULL_Q, &q, 4);
     return;
   }
 
@@ -421,14 +757,15 @@ static void handleSerialCommand(const String &lineIn) {
     if (!t) return;
     float fs = (float)strtod(t, nullptr);
     int32_t q = fullStepsFloatToQ(fs);
-    sendCmdI32(CMD_SET_MISMATCH_GAIN_FULL_Q, q);
+    enqueueTargeted(CMD_SET_MISMATCH_GAIN_FULL_Q, &q, 4);
     return;
   }
 
   if (eq(tok, "THR_US")) {
     char* t = strtok(nullptr, " ");
     if (!t) return;
-    sendCmdU32(CMD_SET_MISMATCH_CHECK_US, (uint32_t)strtoul(t, nullptr, 10));
+    uint32_t v = (uint32_t)strtoul(t, nullptr, 10);
+    enqueueTargeted(CMD_SET_MISMATCH_CHECK_US, &v, 4);
     return;
   }
 
@@ -455,15 +792,11 @@ static void handleSerialCommand(const String &lineIn) {
     memcpy(p + 10, &t0x10,  2);
     p[12] = samples;
 
-    sendCmd(CMD_SET_THERMISTOR_PARAMS, p, sizeof(p));
+    enqueueTargeted(CMD_SET_THERMISTOR_PARAMS, p, sizeof(p));
     return;
   }
 
-  if (eq(tok, "REQ_STATUS")) {
-    // motor doesn't immediately reply, but it will ACK and continue periodic status
-    sendCmd(CMD_REQUEST_STATUS_NOW, nullptr, 0);
-    return;
-  }
+  if (eq(tok, "REQ_STATUS")) { enqueueTargeted(CMD_REQUEST_STATUS_NOW, nullptr, 0); return; }
 
   Serial.println("{\"type\":\"info\",\"msg\":\"Unknown command. Send HELP\"}");
 }
@@ -521,23 +854,21 @@ void loop() {
 
     if (magic != MN_MAGIC || version != MN_VERSION) continue;
 
-    // Remember motor MAC from any valid packet
-    if (!g_haveMotor) {
-      memcpy(g_motorMac, item.mac, 6);
-      macToStr(g_motorMac, g_motorMacStr);
-      g_haveMotor = true;
-      Serial.printf("{\"type\":\"info\",\"msg\":\"Motor detected\",\"motor\":\"%s\"}\n", g_motorMacStr);
-    }
+    MotorRecord* motor = upsertMotor(item.mac);
+    if (!motor) continue;
+    motor->last_seen_ms = millis();
 
     if (type == MSG_ACK && item.len == sizeof(MsgAck)) {
       MsgAck a;
       memcpy(&a, item.data, sizeof(a));
-      Serial.printf("{\"type\":\"ack\",\"from\":\"%s\",\"cmd\":\"0x%04X\",\"seq\":%u,\"code\":%u}\n",
-                    g_motorMacStr, (unsigned)a.cmd, (unsigned)a.seq, (unsigned)a.code);
+      motor->node_id = a.node_id;
+      emitAckJson(motor->macStr, motor->node_id, a);
+      clearPendingMatching(item.mac, a.cmd, a.seq);
     } else if (type == MSG_STATUS && item.len == sizeof(MsgStatus)) {
-      memcpy(&g_lastStatus, item.data, sizeof(MsgStatus));
-      g_haveLastStatus = true;
-      emitLastStatusJson();
+      memcpy(&motor->last_status, item.data, sizeof(MsgStatus));
+      motor->have_status = true;
+      motor->node_id = motor->last_status.node_id;
+      emitStatusJson(motor->macStr, motor->node_id, motor->last_status);
     }
   }
 
@@ -546,4 +877,6 @@ void loop() {
   if (readLine(line)) {
     handleSerialCommand(line);
   }
+
+  serviceTx();
 }

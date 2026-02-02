@@ -3,6 +3,7 @@
 #include <TMCStepper.h>
 #include <FastAccelStepper.h>
 #include <SPI.h>
+#include <Preferences.h>
 #include <math.h>
 #include <type_traits>
 #include <utility>
@@ -67,6 +68,17 @@ static bool g_keep_enabled    = false;
 
 // CL mode: 0=off, 1=active recovery when idle + correction during moves
 static uint8_t g_cl_mode = 0;
+
+// =====================
+// NVS persistence
+// =====================
+static Preferences g_prefs;
+static bool g_prefs_inited = false;
+static inline void ensurePrefs() {
+  if (g_prefs_inited) return;
+  (void)g_prefs.begin("mn_mc", false);
+  g_prefs_inited = true;
+}
 
 // =====================
 // Guards / limits
@@ -638,7 +650,114 @@ static void serviceMotion() {
 // =====================
 // Public API
 // =====================
+static constexpr uint32_t MC_CFG_MAGIC   = 0x4D4E4346; // 'MNCF'
+static constexpr uint16_t MC_CFG_VERSION = 1;
+
+struct MotionConfigBlob {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t reserved0;
+
+  uint32_t speed_sps;
+  uint32_t accel_sps2;
+  uint32_t mismatch_check_us;
+  uint32_t enc_poll_us;
+
+  int32_t mismatch_base_full_q;
+  int32_t mismatch_gain_full_q;
+
+  uint16_t usteps;
+  uint8_t  irun;
+  uint8_t  ihold;
+  uint8_t  iholddelay;
+  uint8_t  intpol;
+  uint8_t  dedge;
+  uint8_t  keep_enabled;
+  uint8_t  cl_mode;
+  uint8_t  rsv[3];
+};
+
+static_assert(sizeof(MotionConfigBlob) == 44, "MotionConfigBlob size mismatch");
+
+static inline void loadConfigFromNvs() {
+  ensurePrefs();
+
+  MotionConfigBlob blob{};
+  if (g_prefs.getBytesLength("cfg") != sizeof(blob)) return;
+  if (g_prefs.getBytes("cfg", &blob, sizeof(blob)) != sizeof(blob)) return;
+  if (blob.magic != MC_CFG_MAGIC || blob.version != MC_CFG_VERSION) return;
+
+  // Apply with validation/clamping
+  g_keep_enabled = (blob.keep_enabled != 0);
+  g_cl_mode = (blob.cl_mode == 0) ? 0 : 1;
+
+  if (blob.usteps==1||blob.usteps==2||blob.usteps==4||blob.usteps==8||blob.usteps==16||blob.usteps==32||blob.usteps==64||blob.usteps==128||blob.usteps==256) {
+    g_usteps = blob.usteps;
+  }
+
+  if (blob.irun <= 31) g_irun = blob.irun;
+  if (blob.ihold <= 31) g_ihold = blob.ihold;
+  if (blob.iholddelay <= 15) g_iholddelay = blob.iholddelay;
+
+  g_intpol = (blob.intpol != 0);
+  g_dedge  = (blob.dedge  != 0);
+
+  if (blob.speed_sps != 0) g_speed_sps_user = blob.speed_sps;
+  if (blob.accel_sps2 != 0) g_accel_sps2_user = blob.accel_sps2;
+
+  noInterrupts();
+  g_mismatch_base_full_q = blob.mismatch_base_full_q;
+  g_mismatch_gain_full_per_rps_q = blob.mismatch_gain_full_q;
+  interrupts();
+
+  uint32_t mc_us = blob.mismatch_check_us;
+  if (mc_us < 500) mc_us = 500;
+  if (mc_us > 50000) mc_us = 50000;
+  g_mismatch_check_us = mc_us;
+  g_mismatch_next_us = micros() + g_mismatch_check_us;
+  g_cl_next_us = micros() + g_mismatch_check_us;
+
+  uint32_t ep_us = blob.enc_poll_us;
+  if (ep_us < 200) ep_us = 200;
+  if (ep_us > 20000) ep_us = 20000;
+  g_enc_poll_us = ep_us;
+  g_enc_next_us = micros() + g_enc_poll_us;
+}
+
+static inline void saveConfigToNvs() {
+  ensurePrefs();
+
+  MotionConfigBlob blob{};
+  blob.magic = MC_CFG_MAGIC;
+  blob.version = MC_CFG_VERSION;
+  blob.reserved0 = 0;
+
+  blob.speed_sps = g_speed_sps_user;
+  blob.accel_sps2 = g_accel_sps2_user;
+  blob.mismatch_check_us = g_mismatch_check_us;
+  blob.enc_poll_us = g_enc_poll_us;
+
+  noInterrupts();
+  blob.mismatch_base_full_q = g_mismatch_base_full_q;
+  blob.mismatch_gain_full_q = g_mismatch_gain_full_per_rps_q;
+  interrupts();
+
+  blob.usteps = g_usteps;
+  blob.irun = g_irun;
+  blob.ihold = g_ihold;
+  blob.iholddelay = g_iholddelay;
+  blob.intpol = g_intpol ? 1 : 0;
+  blob.dedge = g_dedge ? 1 : 0;
+  blob.keep_enabled = g_keep_enabled ? 1 : 0;
+  blob.cl_mode = g_cl_mode;
+  memset(blob.rsv, 0, sizeof(blob.rsv));
+
+  (void)g_prefs.putBytes("cfg", &blob, sizeof(blob));
+}
+
 static inline bool begin() {
+  loadConfigFromNvs();
+
   pinMode(PIN_STEP, OUTPUT);
   pinMode(PIN_DIR, OUTPUT);
   pinMode(PIN_ENN, OUTPUT);
@@ -679,6 +798,8 @@ static inline bool begin() {
   g_mismatch_next_us = micros() + g_mismatch_check_us;
   g_cl_next_us       = micros() + g_mismatch_check_us;
 
+  if (g_keep_enabled) enableOutputsGuarded();
+
   return true;
 }
 
@@ -693,7 +814,10 @@ static inline void service() {
 static inline void setOutputsEnabled(bool en) { if (en) enableOutputsGuarded(); else disableOutputsGuarded(); }
 static inline bool outputsEnabled() { return g_outputs_enabled; }
 
-static inline void setKeepEnabled(bool en) { g_keep_enabled = en; }
+static inline void setKeepEnabled(bool en) {
+  g_keep_enabled = en;
+  if (en && !g_outputs_enabled) enableOutputsGuarded();
+}
 static inline bool keepEnabled() { return g_keep_enabled; }
 
 static inline void setClosedLoopMode(uint8_t m) { g_cl_mode = (m == 0) ? 0 : 1; }

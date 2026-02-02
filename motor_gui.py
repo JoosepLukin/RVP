@@ -78,6 +78,14 @@ class App(tk.Tk):
         self.master_info = {}
         self.connected_port = tk.StringVar(value="")
 
+        # Node tracking (multi MotorNode support)
+        # mac_str -> {"id": int, "last_seen": float, "status": dict|None}
+        self.nodes = {}
+        self._tree_item_by_mac = {}
+        self.active_mac = None
+        self._config_pull_pending = False
+        self._config_pull_target_mac = None
+
         self._build_ui()
         self._refresh_ports()
 
@@ -102,6 +110,7 @@ class App(tk.Tk):
         self.lbl_conn.pack(side=tk.LEFT, padx=12)
 
         ttk.Button(top, text="GET_STATUS (refresh now)", command=lambda: self._cmd("GET_STATUS")).pack(side=tk.LEFT, padx=6)
+        ttk.Button(top, text="PING (discover nodes)", command=lambda: self._cmd("PING")).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="HELP", command=lambda: self._cmd("HELP")).pack(side=tk.LEFT, padx=4)
 
         # Main layout
@@ -113,15 +122,72 @@ class App(tk.Tk):
         main.add(left, weight=3)
         main.add(right, weight=2)
 
-        # Status panel
-        status_fr = ttk.LabelFrame(left, text="Live Status")
+        # Split left side into tabs so Controls stay visible
+        left_nb = ttk.Notebook(left)
+        left_nb.pack(fill=tk.BOTH, expand=True)
+
+        tab_ctrl = ttk.Frame(left_nb)
+        tab_nodes = ttk.Frame(left_nb)
+        left_nb.add(tab_ctrl, text="Control")
+        left_nb.add(tab_nodes, text="Nodes/Targets")
+
+        # Nodes panel (nodes tab)
+        nodes_fr = ttk.LabelFrame(tab_nodes, text="Nodes")
+        nodes_fr.pack(fill=tk.X, pady=6)
+
+        self.tree_nodes = ttk.Treeview(nodes_fr, columns=("id", "mac", "last"), show="headings", height=5)
+        self.tree_nodes.heading("id", text="ID")
+        self.tree_nodes.heading("mac", text="MAC")
+        self.tree_nodes.heading("last", text="Last seen")
+        self.tree_nodes.column("id", width=40, anchor="center", stretch=False)
+        self.tree_nodes.column("mac", width=150, anchor="w", stretch=True)
+        self.tree_nodes.column("last", width=90, anchor="center", stretch=False)
+        self.tree_nodes.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        self.tree_nodes.bind("<<TreeviewSelect>>", self._on_node_selected)
+
+        id_set_fr = ttk.Frame(nodes_fr)
+        id_set_fr.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+
+        ttk.Label(id_set_fr, text="New ID (1-32):").pack(side=tk.LEFT)
+        self.ent_new_id = ttk.Entry(id_set_fr, width=6)
+        self.ent_new_id.insert(0, "1")
+        self.ent_new_id.pack(side=tk.LEFT, padx=6)
+        ttk.Button(id_set_fr, text="Set ID for selected MAC", command=self._set_id_for_selected).pack(side=tk.LEFT, padx=4)
+
+        # Target IDs panel (nodes tab)
+        targets_fr = ttk.LabelFrame(tab_nodes, text="Target IDs (messages go to these MotorNode IDs)")
+        targets_fr.pack(fill=tk.X, pady=6)
+
+        self.target_id_vars = [tk.BooleanVar(value=False) for _ in range(32)]
+        grid = ttk.Frame(targets_fr)
+        grid.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        cols = 8
+        for i in range(32):
+            r = i // cols
+            c = i % cols
+            ttk.Checkbutton(grid, text=str(i + 1), variable=self.target_id_vars[i]).grid(row=r, column=c, padx=6, pady=2, sticky="w")
+
+        btns = ttk.Frame(targets_fr)
+        btns.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        ttk.Button(btns, text="All", command=self._targets_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="None", command=self._targets_none).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Active only", command=self._targets_active_only).pack(side=tk.LEFT, padx=4)
+
+        # Status panel (control tab)
+        status_fr = ttk.LabelFrame(tab_ctrl, text="Live Status")
         status_fr.pack(fill=tk.X, pady=6)
 
         self.status_vars = {}
+        status_fr.grid_columnconfigure(1, weight=1)
+        status_fr.grid_columnconfigure(3, weight=1)
+
         def add_stat(row, key, label):
-            ttk.Label(status_fr, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=2)
+            rows_per_col = 10
+            col = 0 if row < rows_per_col else 2
+            r = row if row < rows_per_col else (row - rows_per_col)
+            ttk.Label(status_fr, text=label).grid(row=r, column=col, sticky="w", padx=6, pady=2)
             v = tk.StringVar(value="—")
-            ttk.Label(status_fr, textvariable=v, font=("Consolas", 11)).grid(row=row, column=1, sticky="w", padx=6, pady=2)
+            ttk.Label(status_fr, textvariable=v, font=("Consolas", 11)).grid(row=r, column=col + 1, sticky="w", padx=6, pady=2)
             self.status_vars[key] = v
 
         add_stat(0, "from", "Motor MAC")
@@ -144,15 +210,15 @@ class App(tk.Tk):
         add_stat(17, "ioin", "IOIN")
         add_stat(18, "ifcnt", "IFCNT")
 
-        # Controls panel
-        ctrl_fr = ttk.LabelFrame(left, text="Motion Controls")
+        # Controls panel (control tab)
+        ctrl_fr = ttk.LabelFrame(tab_ctrl, text="Motion Controls")
         ctrl_fr.pack(fill=tk.X, pady=6)
 
         row = 0
-        ttk.Button(ctrl_fr, text="Enable", command=lambda: self._cmd("ENABLE 1")).grid(row=row, column=0, padx=5, pady=5, sticky="ew")
-        ttk.Button(ctrl_fr, text="Disable", command=lambda: self._cmd("ENABLE 0")).grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(ctrl_fr, text="STOP (decel)", command=lambda: self._cmd("STOP")).grid(row=row, column=2, padx=5, pady=5, sticky="ew")
-        ttk.Button(ctrl_fr, text="FSTOP (hard)", command=lambda: self._cmd("FSTOP")).grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+        ttk.Button(ctrl_fr, text="Enable", command=lambda: self._cmd_motor("ENABLE 1")).grid(row=row, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(ctrl_fr, text="Disable", command=lambda: self._cmd_motor("ENABLE 0")).grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(ctrl_fr, text="STOP (decel)", command=lambda: self._cmd_motor("STOP")).grid(row=row, column=2, padx=5, pady=5, sticky="ew")
+        ttk.Button(ctrl_fr, text="FSTOP (hard)", command=lambda: self._cmd_motor("FSTOP")).grid(row=row, column=3, padx=5, pady=5, sticky="ew")
 
         row += 1
         ttk.Label(ctrl_fr, text="MoveTo:").grid(row=row, column=0, padx=5, pady=5, sticky="e")
@@ -174,8 +240,8 @@ class App(tk.Tk):
         self.ent_vel.grid(row=row, column=1, padx=5, pady=5, sticky="w")
         ttk.Button(ctrl_fr, text="VEL", command=self._send_vel).grid(row=row, column=2, padx=5, pady=5, sticky="ew")
 
-        # Toggles
-        togg_fr = ttk.LabelFrame(left, text="Toggles")
+        # Toggles (control tab)
+        togg_fr = ttk.LabelFrame(tab_ctrl, text="Toggles")
         togg_fr.pack(fill=tk.X, pady=6)
 
         self.var_keep = tk.BooleanVar(value=False)
@@ -269,19 +335,21 @@ class App(tk.Tk):
         f5 = ttk.LabelFrame(cfg, text="Sync / Zero helpers")
         f5.pack(fill=tk.X, pady=6, padx=6)
 
-        ttk.Button(f5, text="ENC_TO_MOTOR", command=lambda: self._cmd("ENC_TO_MOTOR")).grid(row=0, column=0, padx=6, pady=4)
-        ttk.Button(f5, text="MOTOR_TO_ENC", command=lambda: self._cmd("MOTOR_TO_ENC")).grid(row=0, column=1, padx=6, pady=4)
-        ttk.Button(f5, text="MOTOR_ZERO", command=lambda: self._cmd("MOTOR_ZERO")).grid(row=1, column=0, padx=6, pady=4)
-        ttk.Button(f5, text="ENC_ZERO", command=lambda: self._cmd("ENC_ZERO")).grid(row=1, column=1, padx=6, pady=4)
+        ttk.Button(f5, text="ENC_TO_MOTOR", command=lambda: self._cmd_motor("ENC_TO_MOTOR")).grid(row=0, column=0, padx=6, pady=4)
+        ttk.Button(f5, text="MOTOR_TO_ENC", command=lambda: self._cmd_motor("MOTOR_TO_ENC")).grid(row=0, column=1, padx=6, pady=4)
+        ttk.Button(f5, text="MOTOR_ZERO", command=lambda: self._cmd_motor("MOTOR_ZERO")).grid(row=1, column=0, padx=6, pady=4)
+        ttk.Button(f5, text="ENC_ZERO", command=lambda: self._cmd_motor("ENC_ZERO")).grid(row=1, column=1, padx=6, pady=4)
 
-        ttk.Button(f5, text="APPLY (re-write TMC regs)", command=lambda: self._cmd("APPLY")).grid(row=2, column=0, padx=6, pady=4)
-        ttk.Button(f5, text="REQ_STATUS (optional)", command=lambda: self._cmd("REQ_STATUS")).grid(row=2, column=1, padx=6, pady=4)
+        ttk.Button(f5, text="APPLY (re-write TMC regs)", command=lambda: self._cmd_motor("APPLY")).grid(row=2, column=0, padx=6, pady=4)
+        ttk.Button(f5, text="REQ_STATUS (targets)", command=lambda: self._cmd_motor("REQ_STATUS")).grid(row=2, column=1, padx=6, pady=4)
 
         # Save / load config (extra useful feature)
         f6 = ttk.Frame(cfg); f6.pack(fill=tk.X, pady=8, padx=6)
         ttk.Button(f6, text="Save config…", command=self._save_config).pack(side=tk.LEFT, padx=6)
         ttk.Button(f6, text="Load config…", command=self._load_config).pack(side=tk.LEFT, padx=6)
         ttk.Button(f6, text="Send config to node", command=self._send_full_config).pack(side=tk.LEFT, padx=6)
+        ttk.Button(f6, text="Update config from node (active)", command=self._pull_config_from_active).pack(side=tk.LEFT, padx=6)
+        ttk.Button(f6, text="Save config to flash (targets)", command=self._save_config_to_flash).pack(side=tk.LEFT, padx=6)
 
         # Log
         log_fr = ttk.LabelFrame(right, text="Log")
@@ -325,42 +393,57 @@ class App(tk.Tk):
         self.sw.send_line(s)
         self._log(f"> {s}\n")
 
+    def _target_mask(self) -> int:
+        mask = 0
+        for i, v in enumerate(self.target_id_vars):
+            if v.get():
+                mask |= (1 << i)  # bit0 -> ID1
+        return mask
+
+    def _cmd_motor(self, cmd: str, mask: int = None):
+        if mask is None:
+            mask = self._target_mask()
+        if not mask:
+            self._log("No target IDs selected.\n")
+            return
+        self._cmd(f"IDS 0x{mask:08X} {cmd}")
+
     def _send_moveto(self):
-        self._cmd(f"MOVE_TO {self.ent_moveto.get().strip()}")
+        self._cmd_motor(f"MOVE_TO {self.ent_moveto.get().strip()}")
 
     def _send_moveby(self):
-        self._cmd(f"MOVE_BY {self.ent_moveby.get().strip()}")
+        self._cmd_motor(f"MOVE_BY {self.ent_moveby.get().strip()}")
 
     def _send_vel(self):
-        self._cmd(f"VEL {self.ent_vel.get().strip()}")
+        self._cmd_motor(f"VEL {self.ent_vel.get().strip()}")
 
     def _toggle_keep(self):
-        self._cmd(f"KEEP {1 if self.var_keep.get() else 0}")
+        self._cmd_motor(f"KEEP {1 if self.var_keep.get() else 0}")
 
     def _toggle_cl(self):
-        self._cmd(f"CL {1 if self.var_cl.get() else 0}")
+        self._cmd_motor(f"CL {1 if self.var_cl.get() else 0}")
 
     def _apply_speed_accel(self):
-        self._cmd(f"SPEED {self.ent_speed.get().strip()}")
-        self._cmd(f"ACCEL {self.ent_accel.get().strip()}")
+        self._cmd_motor(f"SPEED {self.ent_speed.get().strip()}")
+        self._cmd_motor(f"ACCEL {self.ent_accel.get().strip()}")
 
     def _set_usteps(self):
-        self._cmd(f"USTEPS {self.cb_usteps.get().strip()}")
+        self._cmd_motor(f"USTEPS {self.cb_usteps.get().strip()}")
 
     def _set_currents(self):
-        self._cmd(f"CUR {self.ent_irun.get().strip()} {self.ent_ihold.get().strip()} {self.ent_ihd.get().strip()}")
+        self._cmd_motor(f"CUR {self.ent_irun.get().strip()} {self.ent_ihold.get().strip()} {self.ent_ihd.get().strip()}")
 
     def _set_thr_base(self):
-        self._cmd(f"THR_BASE {self.ent_thr_base.get().strip()}")
+        self._cmd_motor(f"THR_BASE {self.ent_thr_base.get().strip()}")
 
     def _set_thr_gain(self):
-        self._cmd(f"THR_GAIN {self.ent_thr_gain.get().strip()}")
+        self._cmd_motor(f"THR_GAIN {self.ent_thr_gain.get().strip()}")
 
     def _set_thr_us(self):
-        self._cmd(f"THR_US {self.ent_thr_us.get().strip()}")
+        self._cmd_motor(f"THR_US {self.ent_thr_us.get().strip()}")
 
     def _set_therm(self):
-        self._cmd(
+        self._cmd_motor(
             f"THERM {self.ent_rfixed.get().strip()} {self.ent_r0.get().strip()} "
             f"{self.ent_beta.get().strip()} {self.ent_t0.get().strip()} {self.ent_samples.get().strip()}"
         )
@@ -391,18 +474,38 @@ class App(tk.Tk):
 
     def _send_full_config(self):
         # Sends all current UI settings to node in a reasonable order
-        self._cmd(f"KEEP {1 if self.var_keep.get() else 0}")
-        self._cmd(f"CL {1 if self.var_cl.get() else 0}")
-        self._cmd(f"USTEPS {self.cb_usteps.get().strip()}")
-        self._cmd(f"CUR {self.ent_irun.get().strip()} {self.ent_ihold.get().strip()} {self.ent_ihd.get().strip()}")
-        self._cmd(f"SPEED {self.ent_speed.get().strip()}")
-        self._cmd(f"ACCEL {self.ent_accel.get().strip()}")
-        self._cmd(f"THR_BASE {self.ent_thr_base.get().strip()}")
-        self._cmd(f"THR_GAIN {self.ent_thr_gain.get().strip()}")
-        self._cmd(f"THR_US {self.ent_thr_us.get().strip()}")
+        self._cmd_motor(f"KEEP {1 if self.var_keep.get() else 0}")
+        self._cmd_motor(f"CL {1 if self.var_cl.get() else 0}")
+        self._cmd_motor(f"USTEPS {self.cb_usteps.get().strip()}")
+        self._cmd_motor(f"CUR {self.ent_irun.get().strip()} {self.ent_ihold.get().strip()} {self.ent_ihd.get().strip()}")
+        self._cmd_motor(f"SPEED {self.ent_speed.get().strip()}")
+        self._cmd_motor(f"ACCEL {self.ent_accel.get().strip()}")
+        self._cmd_motor(f"THR_BASE {self.ent_thr_base.get().strip()}")
+        self._cmd_motor(f"THR_GAIN {self.ent_thr_gain.get().strip()}")
+        self._cmd_motor(f"THR_US {self.ent_thr_us.get().strip()}")
         self._set_therm()
-        self._cmd("APPLY")
+        self._cmd_motor("APPLY")
         self._cmd("GET_STATUS")
+
+    def _save_config_to_flash(self):
+        # Push full config, then request NVS save on MotorNode(s)
+        self._send_full_config()
+        self._cmd_motor("SAVE_CFG")
+        self._cmd_motor("REQ_STATUS")
+
+    def _pull_config_from_active(self):
+        if not self.active_mac:
+            messagebox.showerror("Error", "Select a node first (in the Nodes list).")
+            return
+        node = self.nodes.get(self.active_mac, {})
+        node_id = int(node.get("id", 0) or 0)
+        if node_id < 1 or node_id > 32:
+            messagebox.showerror("Error", "Active node has no valid ID (1-32). Set an ID first.")
+            return
+        self._config_pull_pending = True
+        self._config_pull_target_mac = self.active_mac
+        mask = 1 << (node_id - 1)
+        self._cmd_motor("REQ_STATUS", mask=mask)
 
     def _current_config_dict(self):
         return {
@@ -471,14 +574,127 @@ class App(tk.Tk):
 
         t = msg.get("type", "")
         if t == "status":
-            self.status = msg
-            self._update_status_ui(msg)
+            self._record_node_msg(msg)
+            if not self.active_mac:
+                self.active_mac = msg.get("from")
+            if msg.get("from") == self.active_mac:
+                self.status = msg
+                self._update_status_ui(msg)
+            if self._config_pull_pending and msg.get("from") == self._config_pull_target_mac:
+                self._apply_status_config_to_ui(msg)
+                self._config_pull_pending = False
+                self._config_pull_target_mac = None
         elif t == "ack":
-            self._log(f"ACK cmd={msg.get('cmd')} seq={msg.get('seq')} code={msg.get('code')}\n")
+            self._record_node_msg(msg)
+            self._log(f"ACK id={msg.get('id','?')} cmd={msg.get('cmd')} seq={msg.get('seq')} code={msg.get('code')}\n")
         elif t == "info":
             self._log(f"[INFO] {msg.get('msg','')}\n")
         else:
             self._log(line + "\n")
+
+    def _record_node_msg(self, msg: dict):
+        mac = msg.get("from") or msg.get("mac")
+        if not mac:
+            return
+        now = time.time()
+        node = self.nodes.get(mac)
+        if not node:
+            node = {"id": 0, "last_seen": now, "status": None}
+            self.nodes[mac] = node
+        node["last_seen"] = now
+        if "id" in msg and msg.get("id") is not None:
+            try:
+                node["id"] = int(msg.get("id") or 0)
+            except Exception:
+                pass
+        if msg.get("type") == "status":
+            node["status"] = msg
+        self._upsert_node_row(mac)
+
+    def _upsert_node_row(self, mac: str):
+        node = self.nodes.get(mac)
+        if not node:
+            return
+        node_id = node.get("id", 0) or 0
+        last_seen = node.get("last_seen", 0.0) or 0.0
+        last_txt = time.strftime("%H:%M:%S", time.localtime(last_seen)) if last_seen else "â€”"
+
+        item = self._tree_item_by_mac.get(mac)
+        values = (str(node_id), mac, last_txt)
+        if item and self.tree_nodes.exists(item):
+            self.tree_nodes.item(item, values=values)
+        else:
+            item = self.tree_nodes.insert("", tk.END, values=values)
+            self._tree_item_by_mac[mac] = item
+
+    def _on_node_selected(self, _evt=None):
+        sel = self.tree_nodes.selection()
+        if not sel:
+            return
+        item = sel[0]
+        vals = self.tree_nodes.item(item, "values")
+        if not vals or len(vals) < 2:
+            return
+        mac = vals[1]
+        self.active_mac = mac
+        st = self.nodes.get(mac, {}).get("status")
+        if st:
+            self.status = st
+            self._update_status_ui(st)
+
+    def _targets_all(self):
+        for v in self.target_id_vars:
+            v.set(True)
+
+    def _targets_none(self):
+        for v in self.target_id_vars:
+            v.set(False)
+
+    def _targets_active_only(self):
+        self._targets_none()
+        if not self.active_mac:
+            return
+        node_id = int(self.nodes.get(self.active_mac, {}).get("id", 0) or 0)
+        if 1 <= node_id <= 32:
+            self.target_id_vars[node_id - 1].set(True)
+
+    def _set_id_for_selected(self):
+        if not self.active_mac:
+            messagebox.showerror("Error", "Select a node first (in the Nodes list).")
+            return
+        try:
+            node_id = int(self.ent_new_id.get().strip())
+        except Exception:
+            messagebox.showerror("Error", "ID must be a number (1-32).")
+            return
+        if node_id < 1 or node_id > 32:
+            messagebox.showerror("Error", "ID must be 1-32.")
+            return
+        self._cmd(f"SET_ID {self.active_mac} {node_id}")
+
+    def _apply_status_config_to_ui(self, s: dict):
+        # Pull a subset of config from the node status. Only called on explicit user action.
+        try:
+            self.var_keep.set(bool(int(s.get("keep", 0))))
+            self.var_cl.set(bool(int(s.get("cl", 0))))
+        except Exception:
+            pass
+
+        try:
+            if "usteps" in s:
+                self.cb_usteps.set(str(s.get("usteps")))
+            if "irun" in s:
+                self.ent_irun.delete(0, tk.END); self.ent_irun.insert(0, str(s.get("irun")))
+            if "ihold" in s:
+                self.ent_ihold.delete(0, tk.END); self.ent_ihold.insert(0, str(s.get("ihold")))
+            if "ihd" in s:
+                self.ent_ihd.delete(0, tk.END); self.ent_ihd.insert(0, str(s.get("ihd")))
+            if "speed" in s:
+                self.ent_speed.delete(0, tk.END); self.ent_speed.insert(0, str(s.get("speed")))
+            if "accel" in s:
+                self.ent_accel.delete(0, tk.END); self.ent_accel.insert(0, str(s.get("accel")))
+        except Exception:
+            pass
 
     def _update_status_ui(self, s):
         # Display fields
@@ -514,17 +730,6 @@ class App(tk.Tk):
         try:
             self.var_keep.set(bool(int(s.get("keep", 0))))
             self.var_cl.set(bool(int(s.get("cl", 0))))
-        except Exception:
-            pass
-
-        # Update config entry hints from status
-        try:
-            self.cb_usteps.set(str(s.get("usteps", self.cb_usteps.get())))
-            self.ent_irun.delete(0, tk.END); self.ent_irun.insert(0, str(s.get("irun", self.ent_irun.get())))
-            self.ent_ihold.delete(0, tk.END); self.ent_ihold.insert(0, str(s.get("ihold", self.ent_ihold.get())))
-            self.ent_ihd.delete(0, tk.END); self.ent_ihd.insert(0, str(s.get("ihd", self.ent_ihd.get())))
-            self.ent_speed.delete(0, tk.END); self.ent_speed.insert(0, str(s.get("speed", self.ent_speed.get())))
-            self.ent_accel.delete(0, tk.END); self.ent_accel.insert(0, str(s.get("accel", self.ent_accel.get())))
         except Exception:
             pass
 

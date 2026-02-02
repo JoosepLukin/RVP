@@ -47,6 +47,7 @@ void setup() {
   digitalWrite(PIN_LED_STATUS, LOW);
 
   Sensors::begin();
+  Sensors::loadConfigFromNvs();
 
   if (!MotionControl::begin()) {
     Serial.println("[MN] MotionControl init FAILED");
@@ -72,6 +73,11 @@ void setup() {
 void loop() {
   MotionControl::service();
   EspNowComms::service();
+
+  // Fast status response when requested (GUI "Update config from node")
+  if (EspNowComms::consumeStatusRequest()) {
+    sendStatusTick();
+  }
 
   // Missed steps LED ON while mismatch is active
   digitalWrite(PIN_LED_MISSED, MotionControl::mismatchActive() ? HIGH : LOW);
