@@ -447,7 +447,6 @@ static void closedLoopCorrectService() {
 static void closedLoopIdleRecoveryService() {
   if (g_cl_mode != 1 || !g_stepper) return;
   if (g_mode != Mode::IDLE) return;
-  if (g_outputs_enabled) return;
   if (!g_mismatch_active) return;
 
   int32_t motor_user = getLogicalUserPos();
@@ -463,7 +462,7 @@ static void closedLoopIdleRecoveryService() {
 
   applyConfig();
   applySpeedAccelToStepper();
-  enableOutputsGuarded();
+  if (!g_outputs_enabled) enableOutputsGuarded();
 
   // Keep logical position unchanged while physically moving corr_lib
   addBiasLib(-corr_lib);
@@ -620,7 +619,7 @@ static void serviceMotion() {
   if (g_mode == Mode::RECOVERING) {
     if (!g_stepper->isRunning()) {
       g_mode = Mode::IDLE;
-      disableOutputsGuarded(); // must disable after CL1 recovery
+      if (!g_keep_enabled) disableOutputsGuarded();
     }
     return;
   }
@@ -775,7 +774,13 @@ static inline bool begin() {
   digitalWrite(PIN_ENC_CS, HIGH);
   SPI.begin(PIN_ENC_SCK, PIN_ENC_MISO, PIN_ENC_MOSI, PIN_ENC_CS);
 
-  (void)as5047pReadReg14(AS5047P_REG_ANGLECOM);
+  // Prime encoder state so ENC_ZERO works immediately after boot.
+  uint16_t raw = as5047pReadReg14(AS5047P_REG_ANGLECOM);
+  g_enc_raw14 = raw;
+  g_enc_prev_raw14 = raw;
+  g_enc_has_prev = true;
+  g_enc_unwrap_counts = (int64_t)raw;
+  g_enc_pos_steps = countsToUserSteps(g_enc_unwrap_counts);
   g_enc_next_us = micros() + g_enc_poll_us;
 
   g_engine.init();
@@ -811,16 +816,53 @@ static inline void service() {
   closedLoopIdleRecoveryService();
 }
 
-static inline void setOutputsEnabled(bool en) { if (en) enableOutputsGuarded(); else disableOutputsGuarded(); }
+static inline void setOutputsEnabled(bool en) {
+  if (en) {
+    applyConfig();
+    applySpeedAccelToStepper();
+    if (!g_outputs_enabled) enableOutputsGuarded();
+  } else {
+    disableOutputsGuarded();
+  }
+}
 static inline bool outputsEnabled() { return g_outputs_enabled; }
 
 static inline void setKeepEnabled(bool en) {
   g_keep_enabled = en;
-  if (en && !g_outputs_enabled) enableOutputsGuarded();
+  if (en) {
+    applyConfig();
+    applySpeedAccelToStepper();
+    if (!g_outputs_enabled) enableOutputsGuarded();
+    return;
+  }
+  // When disabling Keep while idle, drop outputs immediately so the UI feels "instant".
+  if (g_mode == Mode::IDLE && g_outputs_enabled) {
+    disableOutputsGuarded();
+  }
 }
 static inline bool keepEnabled() { return g_keep_enabled; }
 
-static inline void setClosedLoopMode(uint8_t m) { g_cl_mode = (m == 0) ? 0 : 1; }
+static inline void setClosedLoopMode(uint8_t m) {
+  uint8_t new_mode = (m == 0) ? 0 : 1;
+  if (new_mode == g_cl_mode) return;
+  g_cl_mode = new_mode;
+
+  if (g_cl_mode == 0) {
+    // If we're in a CL-initiated recovery move, stop it when CL is turned off.
+    if (g_mode == Mode::RECOVERING && g_stepper && g_stepper->isRunning()) {
+      g_vel_restart_pending = false;
+      clearMoveTargetTracking();
+      g_stepper->stopMove();
+      g_mode = Mode::STOPPING;
+    }
+    return;
+  }
+
+  // Make CL feel immediate: run mismatch/correction logic ASAP (outputs are NOT forced on).
+  uint32_t now = micros();
+  g_mismatch_next_us = now;
+  g_cl_next_us = now;
+}
 static inline uint8_t closedLoopMode() { return g_cl_mode; }
 
 static inline void applyDriverConfigNow() { applyConfig(); }
@@ -878,7 +920,13 @@ static inline void motorLogicalZero() {
   int32_t raw = getRawLibPos();
   setBiasLib(-raw);
 }
-static inline void encoderOffsetZero() { noInterrupts(); g_enc_offset_counts = 0; interrupts(); }
+static inline void encoderOffsetZero() {
+  // Set the current physical encoder position as the "zero" reference for encoderUserPos().
+  noInterrupts();
+  g_enc_offset_counts = -g_enc_unwrap_counts;
+  g_enc_pos_steps = 0;
+  interrupts();
+}
 
 static inline void setMismatchBaseFullQ(int32_t full_q) { noInterrupts(); g_mismatch_base_full_q = full_q; interrupts(); }
 static inline void setMismatchGainFullPerRpsQ(int32_t full_q) { noInterrupts(); g_mismatch_gain_full_per_rps_q = full_q; interrupts(); }

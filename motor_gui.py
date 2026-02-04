@@ -5,7 +5,7 @@ import time
 import serial
 import serial.tools.list_ports
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox
 
 BAUD = 115200
 
@@ -109,9 +109,7 @@ class App(tk.Tk):
         self.lbl_conn = ttk.Label(top, text="Disconnected")
         self.lbl_conn.pack(side=tk.LEFT, padx=12)
 
-        ttk.Button(top, text="GET_STATUS (refresh now)", command=lambda: self._cmd("GET_STATUS")).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="PING (discover nodes)", command=lambda: self._cmd("PING")).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="HELP", command=lambda: self._cmd("HELP")).pack(side=tk.LEFT, padx=4)
 
         # Main layout
         main = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -122,101 +120,16 @@ class App(tk.Tk):
         main.add(left, weight=3)
         main.add(right, weight=2)
 
-        # Split left side into tabs so Controls stay visible
-        left_nb = ttk.Notebook(left)
-        left_nb.pack(fill=tk.BOTH, expand=True)
+        left_col = ttk.Frame(left)
+        left_col.pack(fill=tk.BOTH, expand=True)
 
-        tab_ctrl = ttk.Frame(left_nb)
-        tab_nodes = ttk.Frame(left_nb)
-        left_nb.add(tab_ctrl, text="Control")
-        left_nb.add(tab_nodes, text="Nodes/Targets")
-
-        # Nodes panel (nodes tab)
-        nodes_fr = ttk.LabelFrame(tab_nodes, text="Nodes")
-        nodes_fr.pack(fill=tk.X, pady=6)
-
-        self.tree_nodes = ttk.Treeview(nodes_fr, columns=("id", "mac", "last"), show="headings", height=5)
-        self.tree_nodes.heading("id", text="ID")
-        self.tree_nodes.heading("mac", text="MAC")
-        self.tree_nodes.heading("last", text="Last seen")
-        self.tree_nodes.column("id", width=40, anchor="center", stretch=False)
-        self.tree_nodes.column("mac", width=150, anchor="w", stretch=True)
-        self.tree_nodes.column("last", width=90, anchor="center", stretch=False)
-        self.tree_nodes.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
-        self.tree_nodes.bind("<<TreeviewSelect>>", self._on_node_selected)
-
-        id_set_fr = ttk.Frame(nodes_fr)
-        id_set_fr.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
-
-        ttk.Label(id_set_fr, text="New ID (1-32):").pack(side=tk.LEFT)
-        self.ent_new_id = ttk.Entry(id_set_fr, width=6)
-        self.ent_new_id.insert(0, "1")
-        self.ent_new_id.pack(side=tk.LEFT, padx=6)
-        ttk.Button(id_set_fr, text="Set ID for selected MAC", command=self._set_id_for_selected).pack(side=tk.LEFT, padx=4)
-
-        # Target IDs panel (nodes tab)
-        targets_fr = ttk.LabelFrame(tab_nodes, text="Target IDs (messages go to these MotorNode IDs)")
-        targets_fr.pack(fill=tk.X, pady=6)
-
-        self.target_id_vars = [tk.BooleanVar(value=False) for _ in range(32)]
-        grid = ttk.Frame(targets_fr)
-        grid.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
-        cols = 8
-        for i in range(32):
-            r = i // cols
-            c = i % cols
-            ttk.Checkbutton(grid, text=str(i + 1), variable=self.target_id_vars[i]).grid(row=r, column=c, padx=6, pady=2, sticky="w")
-
-        btns = ttk.Frame(targets_fr)
-        btns.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
-        ttk.Button(btns, text="All", command=self._targets_all).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="None", command=self._targets_none).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btns, text="Active only", command=self._targets_active_only).pack(side=tk.LEFT, padx=4)
-
-        # Status panel (control tab)
-        status_fr = ttk.LabelFrame(tab_ctrl, text="Live Status")
-        status_fr.pack(fill=tk.X, pady=6)
-
-        self.status_vars = {}
-        status_fr.grid_columnconfigure(1, weight=1)
-        status_fr.grid_columnconfigure(3, weight=1)
-
-        def add_stat(row, key, label):
-            rows_per_col = 10
-            col = 0 if row < rows_per_col else 2
-            r = row if row < rows_per_col else (row - rows_per_col)
-            ttk.Label(status_fr, text=label).grid(row=r, column=col, sticky="w", padx=6, pady=2)
-            v = tk.StringVar(value="—")
-            ttk.Label(status_fr, textvariable=v, font=("Consolas", 11)).grid(row=r, column=col + 1, sticky="w", padx=6, pady=2)
-            self.status_vars[key] = v
-
-        add_stat(0, "from", "Motor MAC")
-        add_stat(1, "uptime_ms", "Uptime (ms)")
-        add_stat(2, "motor_pos", "Motor pos (user steps)")
-        add_stat(3, "enc_pos", "Encoder pos (user steps)")
-        add_stat(4, "err", "Error (steps)")
-        add_stat(5, "thr", "Threshold (steps)")
-        add_stat(6, "missed", "Missed events (latched count)")
-        add_stat(7, "temp_c", "Temp (°C)")
-        add_stat(8, "moving", "Moving")
-        add_stat(9, "en", "Outputs enabled")
-        add_stat(10, "cl", "Closed-loop mode")
-        add_stat(11, "keep", "Keep enabled")
-        add_stat(12, "speed", "Speed (steps/s)")
-        add_stat(13, "accel", "Accel (steps/s²)")
-        add_stat(14, "usteps", "Microsteps")
-        add_stat(15, "curr", "Currents (irun/ihold/ihd)")
-        add_stat(16, "drv", "DRV_STATUS")
-        add_stat(17, "ioin", "IOIN")
-        add_stat(18, "ifcnt", "IFCNT")
-
-        # Controls panel (control tab)
-        ctrl_fr = ttk.LabelFrame(tab_ctrl, text="Motion Controls")
+        # Controls panel
+        ctrl_fr = ttk.LabelFrame(left_col, text="Motion Controls")
         ctrl_fr.pack(fill=tk.X, pady=6)
 
         row = 0
-        ttk.Button(ctrl_fr, text="Enable", command=lambda: self._cmd_motor("ENABLE 1")).grid(row=row, column=0, padx=5, pady=5, sticky="ew")
-        ttk.Button(ctrl_fr, text="Disable", command=lambda: self._cmd_motor("ENABLE 0")).grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(ctrl_fr, text="Enable", command=lambda: self._set_enable(True)).grid(row=row, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(ctrl_fr, text="Disable", command=lambda: self._set_enable(False)).grid(row=row, column=1, padx=5, pady=5, sticky="ew")
         ttk.Button(ctrl_fr, text="STOP (decel)", command=lambda: self._cmd_motor("STOP")).grid(row=row, column=2, padx=5, pady=5, sticky="ew")
         ttk.Button(ctrl_fr, text="FSTOP (hard)", command=lambda: self._cmd_motor("FSTOP")).grid(row=row, column=3, padx=5, pady=5, sticky="ew")
 
@@ -240,8 +153,8 @@ class App(tk.Tk):
         self.ent_vel.grid(row=row, column=1, padx=5, pady=5, sticky="w")
         ttk.Button(ctrl_fr, text="VEL", command=self._send_vel).grid(row=row, column=2, padx=5, pady=5, sticky="ew")
 
-        # Toggles (control tab)
-        togg_fr = ttk.LabelFrame(tab_ctrl, text="Toggles")
+        # Toggles
+        togg_fr = ttk.LabelFrame(left_col, text="Toggles")
         togg_fr.pack(fill=tk.X, pady=6)
 
         self.var_keep = tk.BooleanVar(value=False)
@@ -251,6 +164,90 @@ class App(tk.Tk):
                         variable=self.var_keep, command=self._toggle_keep).grid(row=0, column=0, padx=6, pady=6, sticky="w")
         ttk.Checkbutton(togg_fr, text="Closed-loop mode (CL=1 active recovery + correction)",
                         variable=self.var_cl, command=self._toggle_cl).grid(row=0, column=1, padx=6, pady=6, sticky="w")
+
+        # Nodes panel
+        nodes_fr = ttk.LabelFrame(left_col, text="Nodes")
+        nodes_fr.pack(fill=tk.X, pady=6)
+
+        self.tree_nodes = ttk.Treeview(nodes_fr, columns=("id", "mac", "last"), show="headings", height=5)
+        self.tree_nodes.heading("id", text="ID")
+        self.tree_nodes.heading("mac", text="MAC")
+        self.tree_nodes.heading("last", text="Last seen")
+        self.tree_nodes.column("id", width=40, anchor="center", stretch=False)
+        self.tree_nodes.column("mac", width=150, anchor="w", stretch=True)
+        self.tree_nodes.column("last", width=90, anchor="center", stretch=False)
+        self.tree_nodes.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        self.tree_nodes.bind("<<TreeviewSelect>>", self._on_node_selected)
+
+        id_set_fr = ttk.Frame(nodes_fr)
+        id_set_fr.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+
+        ttk.Label(id_set_fr, text="New ID (1-32):").pack(side=tk.LEFT)
+        self.ent_new_id = ttk.Entry(id_set_fr, width=6)
+        self.ent_new_id.insert(0, "1")
+        self.ent_new_id.pack(side=tk.LEFT, padx=6)
+        ttk.Button(id_set_fr, text="Set ID for selected MAC", command=self._set_id_for_selected).pack(side=tk.LEFT, padx=4)
+
+        # Target IDs panel
+        targets_fr = ttk.LabelFrame(left_col, text="Target IDs (messages go to these MotorNode IDs)")
+        targets_fr.pack(fill=tk.X, pady=6)
+
+        self.target_id_vars = [tk.BooleanVar(value=False) for _ in range(32)]
+        grid = ttk.Frame(targets_fr)
+        grid.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        cols = 16
+        for i in range(32):
+            r = i // cols
+            c = i % cols
+            ttk.Checkbutton(grid, text=str(i + 1), variable=self.target_id_vars[i]).grid(row=r, column=c, padx=6, pady=2, sticky="w")
+
+        btns = ttk.Frame(targets_fr)
+        btns.pack(side=tk.TOP, fill=tk.X, padx=6, pady=4)
+        ttk.Button(btns, text="All", command=self._targets_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="None", command=self._targets_none).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="Active only", command=self._targets_active_only).pack(side=tk.LEFT, padx=4)
+
+        # Status panel (below Nodes/Targets)
+        status_fr = ttk.LabelFrame(left_col, text="Live Status")
+        status_fr.pack(fill=tk.X, pady=6)
+
+        self.status_vars = {}
+        status_fr.grid_columnconfigure(1, weight=1)
+        status_fr.grid_columnconfigure(3, weight=1)
+        status_fr.grid_columnconfigure(5, weight=1)
+
+        stats = [
+            ("from", "Motor MAC"),
+            ("uptime_ms", "Uptime (ms)"),
+            ("motor_pos", "Motor pos (user steps)"),
+            ("enc_pos", "Encoder pos (user steps)"),
+            ("err", "Error (steps)"),
+            ("thr", "Threshold (steps)"),
+            ("missed", "Missed events (latched count)"),
+            ("temp_c", "Temp (°C)"),
+            ("moving", "Moving"),
+            ("en", "Outputs enabled"),
+            ("cl", "Closed-loop mode"),
+            ("keep", "Keep enabled"),
+            ("speed", "Speed (steps/s)"),
+            ("accel", "Accel (steps/s²)"),
+            ("usteps", "Microsteps"),
+            ("curr", "Currents (irun/ihold/ihd)"),
+            ("drv", "DRV_STATUS"),
+            ("ioin", "IOIN"),
+            ("ifcnt", "IFCNT"),
+        ]
+
+        cols = 3
+        rows_per_col = (len(stats) + (cols - 1)) // cols
+
+        for i, (key, label) in enumerate(stats):
+            col = (i // rows_per_col) * 2
+            r = i % rows_per_col
+            ttk.Label(status_fr, text=label).grid(row=r, column=col, sticky="w", padx=4, pady=1)
+            v = tk.StringVar(value="—")
+            ttk.Label(status_fr, textvariable=v, font=("Consolas", 10)).grid(row=r, column=col + 1, sticky="w", padx=4, pady=1)
+            self.status_vars[key] = v
 
         # Config panel (right)
         cfg = ttk.LabelFrame(right, text="Configuration")
@@ -305,32 +302,6 @@ class App(tk.Tk):
         self.ent_thr_us.grid(row=2, column=1, padx=6, pady=4)
         ttk.Button(f3, text="Set", command=self._set_thr_us).grid(row=2, column=2, padx=6, pady=4)
 
-        # Thermistor
-        f4 = ttk.LabelFrame(cfg, text="Thermistor params (MotorNode ADC GPIO8)")
-        f4.pack(fill=tk.X, pady=6, padx=6)
-
-        ttk.Label(f4, text="Rfixed (ohm):").grid(row=0, column=0, sticky="e", padx=6, pady=3)
-        self.ent_rfixed = ttk.Entry(f4, width=10); self.ent_rfixed.insert(0, "4700")
-        self.ent_rfixed.grid(row=0, column=1, padx=6, pady=3)
-
-        ttk.Label(f4, text="R0 (ohm):").grid(row=0, column=2, sticky="e", padx=6, pady=3)
-        self.ent_r0 = ttk.Entry(f4, width=10); self.ent_r0.insert(0, "47000")
-        self.ent_r0.grid(row=0, column=3, padx=6, pady=3)
-
-        ttk.Label(f4, text="Beta:").grid(row=1, column=0, sticky="e", padx=6, pady=3)
-        self.ent_beta = ttk.Entry(f4, width=10); self.ent_beta.insert(0, "3950")
-        self.ent_beta.grid(row=1, column=1, padx=6, pady=3)
-
-        ttk.Label(f4, text="T0 (°C):").grid(row=1, column=2, sticky="e", padx=6, pady=3)
-        self.ent_t0 = ttk.Entry(f4, width=10); self.ent_t0.insert(0, "25.0")
-        self.ent_t0.grid(row=1, column=3, padx=6, pady=3)
-
-        ttk.Label(f4, text="Samples:").grid(row=2, column=0, sticky="e", padx=6, pady=3)
-        self.ent_samples = ttk.Entry(f4, width=10); self.ent_samples.insert(0, "8")
-        self.ent_samples.grid(row=2, column=1, padx=6, pady=3)
-
-        ttk.Button(f4, text="Apply Therm Params", command=self._set_therm).grid(row=2, column=3, padx=6, pady=3, sticky="e")
-
         # Sync/Zero helpers (features you will want)
         f5 = ttk.LabelFrame(cfg, text="Sync / Zero helpers")
         f5.pack(fill=tk.X, pady=6, padx=6)
@@ -340,14 +311,8 @@ class App(tk.Tk):
         ttk.Button(f5, text="MOTOR_ZERO", command=lambda: self._cmd_motor("MOTOR_ZERO")).grid(row=1, column=0, padx=6, pady=4)
         ttk.Button(f5, text="ENC_ZERO", command=lambda: self._cmd_motor("ENC_ZERO")).grid(row=1, column=1, padx=6, pady=4)
 
-        ttk.Button(f5, text="APPLY (re-write TMC regs)", command=lambda: self._cmd_motor("APPLY")).grid(row=2, column=0, padx=6, pady=4)
-        ttk.Button(f5, text="REQ_STATUS (targets)", command=lambda: self._cmd_motor("REQ_STATUS")).grid(row=2, column=1, padx=6, pady=4)
-
-        # Save / load config (extra useful feature)
+        # Config actions
         f6 = ttk.Frame(cfg); f6.pack(fill=tk.X, pady=8, padx=6)
-        ttk.Button(f6, text="Save config…", command=self._save_config).pack(side=tk.LEFT, padx=6)
-        ttk.Button(f6, text="Load config…", command=self._load_config).pack(side=tk.LEFT, padx=6)
-        ttk.Button(f6, text="Send config to node", command=self._send_full_config).pack(side=tk.LEFT, padx=6)
         ttk.Button(f6, text="Update config from node (active)", command=self._pull_config_from_active).pack(side=tk.LEFT, padx=6)
         ttk.Button(f6, text="Save config to flash (targets)", command=self._save_config_to_flash).pack(side=tk.LEFT, padx=6)
 
@@ -382,7 +347,6 @@ class App(tk.Tk):
             self.btn_conn.config(text="Disconnect")
             self.lbl_conn.config(text=f"Connected: {port}")
             self._log(f"Connected to {port}\n")
-            self._cmd("GET_STATUS")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open {port}\n{e}")
 
@@ -419,9 +383,15 @@ class App(tk.Tk):
 
     def _toggle_keep(self):
         self._cmd_motor(f"KEEP {1 if self.var_keep.get() else 0}")
+        self._cmd_motor("REQ_STATUS")
 
     def _toggle_cl(self):
         self._cmd_motor(f"CL {1 if self.var_cl.get() else 0}")
+        self._cmd_motor("REQ_STATUS")
+
+    def _set_enable(self, en: bool):
+        self._cmd_motor(f"ENABLE {1 if en else 0}")
+        self._cmd_motor("REQ_STATUS")
 
     def _apply_speed_accel(self):
         self._cmd_motor(f"SPEED {self.ent_speed.get().strip()}")
@@ -442,36 +412,6 @@ class App(tk.Tk):
     def _set_thr_us(self):
         self._cmd_motor(f"THR_US {self.ent_thr_us.get().strip()}")
 
-    def _set_therm(self):
-        self._cmd_motor(
-            f"THERM {self.ent_rfixed.get().strip()} {self.ent_r0.get().strip()} "
-            f"{self.ent_beta.get().strip()} {self.ent_t0.get().strip()} {self.ent_samples.get().strip()}"
-        )
-
-    def _save_config(self):
-        cfg = self._current_config_dict()
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json",
-            filetypes=[("JSON", "*.json")]
-        )
-        if not path:
-            return
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-        self._log(f"Saved config: {path}\n")
-
-    def _load_config(self):
-        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            self._apply_config_to_ui(cfg)
-            self._log(f"Loaded config: {path}\n")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load config:\n{e}")
-
     def _send_full_config(self):
         # Sends all current UI settings to node in a reasonable order
         self._cmd_motor(f"KEEP {1 if self.var_keep.get() else 0}")
@@ -483,15 +423,11 @@ class App(tk.Tk):
         self._cmd_motor(f"THR_BASE {self.ent_thr_base.get().strip()}")
         self._cmd_motor(f"THR_GAIN {self.ent_thr_gain.get().strip()}")
         self._cmd_motor(f"THR_US {self.ent_thr_us.get().strip()}")
-        self._set_therm()
-        self._cmd_motor("APPLY")
-        self._cmd("GET_STATUS")
 
     def _save_config_to_flash(self):
         # Push full config, then request NVS save on MotorNode(s)
         self._send_full_config()
         self._cmd_motor("SAVE_CFG")
-        self._cmd_motor("REQ_STATUS")
 
     def _pull_config_from_active(self):
         if not self.active_mac:
@@ -506,51 +442,6 @@ class App(tk.Tk):
         self._config_pull_target_mac = self.active_mac
         mask = 1 << (node_id - 1)
         self._cmd_motor("REQ_STATUS", mask=mask)
-
-    def _current_config_dict(self):
-        return {
-            "keep": bool(self.var_keep.get()),
-            "cl": bool(self.var_cl.get()),
-            "usteps": int(self.cb_usteps.get()),
-            "irun": int(self.ent_irun.get()),
-            "ihold": int(self.ent_ihold.get()),
-            "ihd": int(self.ent_ihd.get()),
-            "speed": int(self.ent_speed.get()),
-            "accel": int(self.ent_accel.get()),
-            "thr_base": float(self.ent_thr_base.get()),
-            "thr_gain": float(self.ent_thr_gain.get()),
-            "thr_us": int(self.ent_thr_us.get()),
-            "therm": {
-                "rfixed": int(self.ent_rfixed.get()),
-                "r0": int(self.ent_r0.get()),
-                "beta": int(self.ent_beta.get()),
-                "t0": float(self.ent_t0.get()),
-                "samples": int(self.ent_samples.get()),
-            }
-        }
-
-    def _apply_config_to_ui(self, cfg):
-        try:
-            self.var_keep.set(bool(cfg.get("keep", False)))
-            self.var_cl.set(bool(cfg.get("cl", False)))
-            self.cb_usteps.set(str(cfg.get("usteps", 32)))
-            self.ent_irun.delete(0, tk.END); self.ent_irun.insert(0, str(cfg.get("irun", 20)))
-            self.ent_ihold.delete(0, tk.END); self.ent_ihold.insert(0, str(cfg.get("ihold", 0)))
-            self.ent_ihd.delete(0, tk.END); self.ent_ihd.insert(0, str(cfg.get("ihd", 1)))
-            self.ent_speed.delete(0, tk.END); self.ent_speed.insert(0, str(cfg.get("speed", 20000)))
-            self.ent_accel.delete(0, tk.END); self.ent_accel.insert(0, str(cfg.get("accel", 200000)))
-            self.ent_thr_base.delete(0, tk.END); self.ent_thr_base.insert(0, str(cfg.get("thr_base", 2.0)))
-            self.ent_thr_gain.delete(0, tk.END); self.ent_thr_gain.insert(0, str(cfg.get("thr_gain", 0.0)))
-            self.ent_thr_us.delete(0, tk.END); self.ent_thr_us.insert(0, str(cfg.get("thr_us", 2000)))
-
-            therm = cfg.get("therm", {})
-            self.ent_rfixed.delete(0, tk.END); self.ent_rfixed.insert(0, str(therm.get("rfixed", 4700)))
-            self.ent_r0.delete(0, tk.END); self.ent_r0.insert(0, str(therm.get("r0", 47000)))
-            self.ent_beta.delete(0, tk.END); self.ent_beta.insert(0, str(therm.get("beta", 3950)))
-            self.ent_t0.delete(0, tk.END); self.ent_t0.insert(0, str(therm.get("t0", 25.0)))
-            self.ent_samples.delete(0, tk.END); self.ent_samples.insert(0, str(therm.get("samples", 8)))
-        except Exception:
-            pass
 
     # ---------------- RX processing ----------------
     def _poll_rx(self):
@@ -617,7 +508,7 @@ class App(tk.Tk):
             return
         node_id = node.get("id", 0) or 0
         last_seen = node.get("last_seen", 0.0) or 0.0
-        last_txt = time.strftime("%H:%M:%S", time.localtime(last_seen)) if last_seen else "â€”"
+        last_txt = time.strftime("%H:%M:%S", time.localtime(last_seen)) if last_seen else "—"
 
         item = self._tree_item_by_mac.get(mac)
         values = (str(node_id), mac, last_txt)

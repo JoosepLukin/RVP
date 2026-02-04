@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include "SketchPreamble.h"
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -153,9 +153,6 @@ struct RxItem {
 };
 
 static QueueHandle_t g_rxQ = nullptr;
-
-// Forward declarations needed for Arduino IDE auto-prototypes.
-struct TxQueued;
 
 // =====================
 // Helpers
