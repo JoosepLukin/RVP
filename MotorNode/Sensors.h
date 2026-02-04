@@ -19,6 +19,7 @@ static uint8_t  g_samples    = 8;        // averaging
 // =====================
 static Preferences g_prefs;
 static bool g_prefs_inited = false;
+// ensurePrefs: Lazy-init Preferences storage for sensor config.
 static inline void ensurePrefs() {
   if (g_prefs_inited) return;
   (void)g_prefs.begin("mn_sens", false);
@@ -42,6 +43,7 @@ struct SensConfigBlob {
 
 static_assert(sizeof(SensConfigBlob) == 24, "SensConfigBlob size mismatch");
 
+// loadConfigFromNvs: Restore thermistor parameters from NVS (if present).
 static inline void loadConfigFromNvs() {
   ensurePrefs();
 
@@ -61,6 +63,7 @@ static inline void loadConfigFromNvs() {
   g_samples = s;
 }
 
+// saveConfigToNvs: Persist current thermistor parameters to NVS.
 static inline void saveConfigToNvs() {
   ensurePrefs();
 
@@ -78,8 +81,12 @@ static inline void saveConfigToNvs() {
   (void)g_prefs.putBytes("cfg", &blob, sizeof(blob));
 }
 
-static inline void setThermistorParams(uint32_t rFixed, uint32_t r0, uint16_t beta,
-                                       int16_t t0_c_x10, uint8_t samples) {
+// setThermistorParams: Update thermistor model parameters (does not auto-save).
+static inline void setThermistorParams(uint32_t rFixed /* Divider resistor, ohms */,
+                                       uint32_t r0 /* NTC nominal resistance at T0, ohms */,
+                                       uint16_t beta /* NTC beta value (Kelvin) */,
+                                       int16_t t0_c_x10 /* T0 in degC*10 */,
+                                       uint8_t samples /* ADC averaging samples (1..64) */) {
   if (rFixed > 0) g_rFixed_ohm = rFixed;
   if (r0 > 0)     g_r0_ohm     = r0;
   if (beta > 0)   g_beta       = beta;
@@ -90,6 +97,7 @@ static inline void setThermistorParams(uint32_t rFixed, uint32_t r0, uint16_t be
   g_samples = samples;
 }
 
+// begin: Configure ADC settings.
 static inline void begin() {
   analogReadResolution(12);
 #if defined(ARDUINO_ARCH_ESP32)
@@ -97,7 +105,7 @@ static inline void begin() {
 #endif
 }
 
-// Returns temperature in Celsius, NAN if invalid
+// readThermistorC: Read thermistor temperature in degC (NAN if invalid).
 static inline float readThermistorC() {
   uint32_t acc = 0;
   for (uint8_t i = 0; i < g_samples; i++) {

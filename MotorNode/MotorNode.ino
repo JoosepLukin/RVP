@@ -13,6 +13,7 @@ static const int PIN_LED_STATUS = 36; // toggles each status send
 static uint32_t g_nextStatusMs = 0;
 static bool g_statusLedState = false;
 
+// sendStatusTick: Send one status frame to the MasterNode (if paired).
 static void sendStatusTick() {
   if (!EspNowComms::hasMaster()) return;
 
@@ -37,6 +38,7 @@ static void sendStatusTick() {
   digitalWrite(PIN_LED_STATUS, g_statusLedState ? HIGH : LOW);
 }
 
+// setup: One-time init (LEDs, sensors, motion control, ESP-NOW).
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -70,6 +72,7 @@ void setup() {
   g_nextStatusMs = millis() + 500;
 }
 
+// loop: Service motor + comms and stream status periodically.
 void loop() {
   MotionControl::service();
   EspNowComms::service();

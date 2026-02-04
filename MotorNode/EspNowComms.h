@@ -151,10 +151,14 @@ static bool g_status_request_pending = false;
 
 static char g_selfMacStr[18] = {0};
 
+// selfMacStr: Returns this MotorNode's MAC address as a printable string.
 static inline const char* selfMacStr() { return g_selfMacStr; }
+// hasMaster: True once we've received at least one valid command (master discovered).
 static inline bool hasMaster() { return g_hasMaster; }
+// nodeId: Persistent numeric node ID (0=unassigned, 1..32=assigned).
 static inline uint16_t nodeId() { return g_node_id; }
 
+// consumeStatusRequest: One-shot flag set by CMD_REQUEST_STATUS_NOW.
 static inline bool consumeStatusRequest() {
   bool v = g_status_request_pending;
   g_status_request_pending = false;
@@ -170,12 +174,15 @@ struct CmdItem {
 static QueueHandle_t g_cmdQ = nullptr;
 
 // -------- utils ----------
-static inline void macToStr(const uint8_t* mac, char* out18) {
+// macToStr: Format a 6-byte MAC into "AA:BB:CC:DD:EE:FF" (18 bytes incl NUL).
+static inline void macToStr(const uint8_t* mac /* 6-byte MAC address */,
+                            char* out18 /* Output buffer (>=18 bytes) */) {
   snprintf(out18, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-static inline void ensurePeer(const uint8_t* mac) {
+// ensurePeer: Add an ESP-NOW peer if it's not already registered.
+static inline void ensurePeer(const uint8_t* mac /* 6-byte MAC address */) {
   esp_now_peer_info_t peer{};
   memcpy(peer.peer_addr, mac, 6);
   peer.channel = 0;     // same channel
@@ -186,7 +193,8 @@ static inline void ensurePeer(const uint8_t* mac) {
   }
 }
 
-static inline void setMasterFrom(const uint8_t* mac) {
+// setMasterFrom: Track the sender as the master (for future status/ACK replies).
+static inline void setMasterFrom(const uint8_t* mac /* 6-byte MAC address */) {
   if (g_hasMaster && memcmp(g_masterMac, mac, 6) == 0) return;
   memcpy(g_masterMac, mac, 6);
   g_hasMaster = true;
@@ -196,7 +204,11 @@ static inline void setMasterFrom(const uint8_t* mac) {
   Serial.print("[MN] Master set to "); Serial.println(s);
 }
 
-static inline void sendAckTo(const uint8_t* mac, uint16_t cmd, uint16_t seq, uint8_t code) {
+// sendAckTo: Send an ACK for one command back to the given MAC.
+static inline void sendAckTo(const uint8_t* mac /* 6-byte destination MAC */,
+                             uint16_t cmd /* Command ID being ACKed */,
+                             uint16_t seq /* Command sequence number */,
+                             uint8_t code /* AckCode */) {
   MsgAck a{};
   a.magic = MN_MAGIC;
   a.version = MN_VERSION;
@@ -209,7 +221,8 @@ static inline void sendAckTo(const uint8_t* mac, uint16_t cmd, uint16_t seq, uin
   (void)esp_now_send(mac, (uint8_t*)&a, sizeof(a));
 }
 
-static inline void fillStatus(MsgStatus& st) {
+// fillStatus: Populate a status frame (temperature is filled in MotorNode.ino).
+static inline void fillStatus(MsgStatus& st /* Output status struct */) {
   st.magic = MN_MAGIC;
   st.version = MN_VERSION;
   st.type = MSG_STATUS;
@@ -246,13 +259,15 @@ static inline void fillStatus(MsgStatus& st) {
   st.rsv1            = 0;
 }
 
-static inline void sendStatus(const MsgStatus& st) {
+// sendStatus: Send a status frame to the last master we heard from.
+static inline void sendStatus(const MsgStatus& st /* Status frame to send */) {
   if (!g_hasMaster) return;
   (void)esp_now_send(g_masterMac, (const uint8_t*)&st, sizeof(st));
 }
 
 // -------- handler ----------
-static inline uint8_t handleCommand(const MsgCommand& m) {
+// handleCommand: Execute one command and return its AckCode.
+static inline uint8_t handleCommand(const MsgCommand& m /* Received command frame */) {
   switch (m.cmd) {
     case CMD_PING: return ACK_OK;
 
@@ -419,7 +434,10 @@ static inline uint8_t handleCommand(const MsgCommand& m) {
 }
 
 // -------- callbacks (ESP-IDF 5.x / Arduino-ESP32 v3.x) ----------
-static void onRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
+// onRecv: ESP-NOW RX callback (queues valid commands for processing in service()).
+static void onRecv(const esp_now_recv_info* info /* RX metadata */,
+                   const uint8_t* data /* Raw payload bytes */,
+                   int len /* Payload length */) {
   if (!info || !data) return;
 
   const uint8_t* mac = info->src_addr;
@@ -441,11 +459,13 @@ static void onRecv(const esp_now_recv_info* info, const uint8_t* data, int len) 
   }
 }
 
+// onSent: ESP-NOW TX callback (unused; protocol ACKs are handled separately).
 static void onSent(const wifi_tx_info_t* /*tx_info*/, esp_now_send_status_t /*status*/) {
   // empty (LED handled in main loop after send)
 }
 
 // -------- public API ----------
+// begin: Initialize WiFi STA + ESP-NOW and load persistent node ID.
 static inline bool begin() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
@@ -476,6 +496,7 @@ static inline bool begin() {
 }
 
 
+// service: Drain queued commands, execute them once (dedup), and ACK every frame.
 static inline void service() {
   if (!g_cmdQ) return;
 
